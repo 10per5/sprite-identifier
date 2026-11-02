@@ -1,0 +1,7 @@
+out/
+__pycache__
+
+# runtime metadata lock/progress/tmp artifacts (out/ is already ignored)
+out/**/metadata.json.lock
+out/**/metadata.json.progress
+*.tmp

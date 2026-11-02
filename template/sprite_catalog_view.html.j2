@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ domain_title }} catalogue viewer</title>
+<style>
+{{ shared_css }}
+main{padding:18px;max-width:1400px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px;margin-top:14px}
+.card{background:#1c1f26;border:1px solid #333;border-radius:8px;padding:8px;min-width:0;cursor:pointer;transition:border-color .12s}
+.card:hover{border-color:#3d5af1}
+.card img.main{width:100%;aspect-ratio:1;object-fit:contain;image-rendering:pixelated;border-radius:4px;display:block}
+.card .nm{font-weight:700;font-size:13px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .cat{color:#8a919c;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .tg{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.card .tg span{font-size:10px;background:#262a33;border:1px solid #393d45;color:#a5b1c4;border-radius:3px;padding:1px 5px}
+.badge{font-size:10px;border-radius:3px;padding:1px 6px;display:inline-block;margin-top:4px}
+.badge.recolor{background:#3a2f0f;border:1px solid #7a6200;color:#f0c36d}
+.badge.base{background:#123a1a;border:1px solid #227a22;color:#93d4a3}
+.variants{display:flex;gap:4px;margin-top:6px;flex-wrap:wrap}
+.variants img{width:34px;height:34px;object-fit:contain;image-rendering:pixelated;border:1px solid #333;border-radius:3px;background-color:#111318;cursor:pointer}
+.variants img:hover{border-color:#3d5af1}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.62);display:flex;align-items:center;justify-content:center;z-index:50}
+.modal .panel{background:#1c1f26;border:1px solid #444;border-radius:10px;padding:18px;max-width:640px;width:92%;max-height:88vh;overflow:auto}
+.modal .row{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.modal img{width:120px;height:120px;object-fit:contain;image-rendering:pixelated;border-radius:6px;flex:none;background-color:#111318}
+.modal .k{font-size:11px;color:#8a919c;text-transform:uppercase;letter-spacing:.05em;margin-top:10px}
+.modal .v{margin-top:2px;overflow-wrap:anywhere}
+.modal .tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.modal .tags span{font-size:11px;background:#262a33;border:1px solid #393d45;color:#a5b1c4;border-radius:4px;padding:2px 7px}
+.modal .nav{margin-top:16px;display:flex;gap:8px;align-items:center}
+.modal .nav .pos{color:#9aa1ad;font-size:12px;margin-left:auto}
+</style></head><body>
+<header>
+<h1>Catalogue viewer · {{ domain_title }}</h1>
+<input id="search" placeholder="Filter by name, category, tag…">
+<select id="cat-filter"><option value="">All categories</option></select>
+<button id="group-toggle">Group recolors</button>
+<span id="summary" class="status"></span>
+</header>
+<main>
+<div id="grid" class="grid"></div>
+<div class="keyhint" style="margin-top:12px">/ focus search · g toggle recolor grouping · click a card for details · Esc closes</div>
+</main>
+<div id="modal" class="hidden"></div>
+<script>
+{{ shared_js }}
+const ENTRIES = {{ entries|safe }};
+const DOMAIN = {{ domain_title|tojson }};
+const grid = document.querySelector('#grid');
+const search = document.querySelector('#search');
+const catFilter = document.querySelector('#cat-filter');
+const groupBtn = document.querySelector('#group-toggle');
+const summary = document.querySelector('#summary');
+const modal = document.querySelector('#modal');
+const GROUP_KEY = 'sprite-viewer-group:' + location.pathname;
+let groupMode = loadJSON(GROUP_KEY) !== false;
+if (!groupMode) groupBtn.textContent = 'Flat view';
+
+// Top-level category counts for the filter dropdown.
+const catCounts = {};
+ENTRIES.forEach(e => { const top = (e.category || 'other').split('/')[0]; catCounts[top] = (catCounts[top] || 0) + 1; });
+Object.keys(catCounts).sort().forEach(c => {
+  const o = document.createElement('option'); o.value = c; o.textContent = `${c} (${catCounts[c]})`; catFilter.appendChild(o);
+});
+
+// Recolor variants keyed by their base image name (catalog.toml sets recolor_of).
+const variantsByBase = {};
+ENTRIES.forEach(e => { if (e.is_recolor) { const k = e.recolor_of || e.base_image || '?'; (variantsByBase[k] = variantsByBase[k] || []).push(e); } });
+const basesOnly = ENTRIES.filter(e => !e.is_recolor);
+const baseNames = new Set(basesOnly.map(e => e.name));
+
+function matches(e, q, cat) {
+  if (cat && (e.category || '').split('/')[0] !== cat) return false;
+  if (!q) return true;
+  const hay = [e.name, e.category, e.subcategory, e.source, (e.tags || []).join(' ')].join(' ').toLowerCase();
+  return hay.includes(q.toLowerCase());
+}
+function visibleEntries() {
+  const q = search.value.trim(), cat = catFilter.value;
+  let list = ENTRIES.filter(e => matches(e, q, cat));
+  if (groupMode) {
+    // Recolors live under their base card — except orphans whose base entry
+    // is missing from the catalogue; those stay visible as standalone cards.
+    list = list.filter(e => !e.is_recolor || !baseNames.has(e.recolor_of || e.base_image || '?'));
+  }
+  return list;
+}
+function cardFor(e) {
+  const card = document.createElement('div');
+  card.className = 'card' + (e.is_recolor ? ' recolor' : '');
+  const img = document.createElement('img');
+  img.className = 'main checker'; img.src = e.src; img.loading = 'lazy'; img.alt = e.name;
+  const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = e.name; nm.title = e.name;
+  const cat = document.createElement('div'); cat.className = 'cat'; cat.textContent = e.category || '';
+  card.append(img, nm, cat);
+  const tags = e.tags || [];
+  if (tags.length) {
+    const tg = document.createElement('div'); tg.className = 'tg';
+    tags.slice(0, 5).forEach(t => { const s = document.createElement('span'); s.textContent = t; tg.appendChild(s); });
+    if (tags.length > 5) { const s = document.createElement('span'); s.textContent = '+' + (tags.length - 5); tg.appendChild(s); }
+    card.appendChild(tg);
+  }
+  if (e.is_recolor) {
+    const b = document.createElement('span'); b.className = 'badge recolor';
+    b.textContent = 'recolor of ' + (e.recolor_of || e.base_image || '?');
+    card.appendChild(b);
+  } else if (variantsByBase[e.name] && variantsByBase[e.name].length) {
+    const n = variantsByBase[e.name].length;
+    const b = document.createElement('span'); b.className = 'badge base';
+    b.textContent = n + ' recolor' + (n > 1 ? 's' : '');
+    card.appendChild(b);
+  }
+  card.addEventListener('click', () => openModal(e));
+  return card;
+}
+function render() {
+  const list = visibleEntries();
+  grid.replaceChildren();
+  for (const e of list) {
+    const card = cardFor(e);
+    if (groupMode && !e.is_recolor && variantsByBase[e.name] && variantsByBase[e.name].length) {
+      const vw = document.createElement('div'); vw.className = 'variants';
+      variantsByBase[e.name].forEach(v => {
+        const vi = document.createElement('img');
+        vi.src = v.src; vi.title = v.name; vi.loading = 'lazy'; vi.alt = v.name;
+        vi.addEventListener('click', ev => { ev.stopPropagation(); openModal(v); });
+        vw.appendChild(vi);
+      });
+      card.appendChild(vw);
+    }
+    grid.appendChild(card);
+  }
+  const recolors = ENTRIES.filter(e => e.is_recolor).length;
+  summary.textContent = `${list.length} shown / ${ENTRIES.length} sprites · ${recolors} recolors · ${Object.keys(catCounts).length} categories`;
+}
+function kv(label, value) {
+  if (value === undefined || value === null || value === '') return null;
+  const wrap = document.createElement('div');
+  const k = document.createElement('div'); k.className = 'k'; k.textContent = label;
+  const v = document.createElement('div'); v.className = 'v'; v.textContent = String(value);
+  wrap.append(k, v);
+  return wrap;
+}
+function closeModal() { modal.classList.add('hidden'); modal.innerHTML = ''; }
+function openModal(e) {
+  const list = ENTRIES; // stable flat order for prev/next
+  const pos = list.indexOf(e);
+  modal.classList.remove('hidden');
+  modal.innerHTML = '';
+  const panel = document.createElement('div'); panel.className = 'panel';
+  const row = document.createElement('div'); row.className = 'row';
+  const img = document.createElement('img'); img.className = 'checker'; img.src = e.src;
+  const info = document.createElement('div'); info.style.flex = '1';
+  const name = document.createElement('div'); name.style.fontSize = '18px'; name.style.fontWeight = '700'; name.textContent = e.name;
+  info.appendChild(name);
+  const els = [
+    kv('Category', e.category), kv('Subcategory', e.subcategory), kv('Source', e.source),
+    kv('Confidence', e.confidence), kv('Pixel hash', e.pixel_hash), kv('Reference', e.reference),
+    kv('Base image', e.base_image), kv('Recolor of', e.recolor_of),
+  ].filter(Boolean);
+  els.forEach(el => info.appendChild(el));
+  const tags = e.tags || [];
+  if (tags.length) {
+    const k = document.createElement('div'); k.className = 'k'; k.textContent = 'Tags';
+    info.appendChild(k);
+    const tt = document.createElement('div'); tt.className = 'tags';
+    tags.forEach(t => { const s = document.createElement('span'); s.textContent = t; tt.appendChild(s); });
+    info.appendChild(tt);
+  }
+  const variants = variantsByBase[e.name] || [];
+  if (variants.length) {
+    const k = document.createElement('div'); k.className = 'k'; k.textContent = 'Recolor variants';
+    info.appendChild(k);
+    const tt = document.createElement('div'); tt.className = 'tags';
+    variants.forEach(v => {
+      const s = document.createElement('span'); s.style.cursor = 'pointer'; s.textContent = v.name;
+      s.addEventListener('click', () => openModal(v));
+      tt.appendChild(s);
+    });
+    info.appendChild(tt);
+  }
+  row.append(img, info);
+  panel.appendChild(row);
+  const nav = document.createElement('div'); nav.className = 'nav';
+  const prev = document.createElement('button'); prev.textContent = 'Prev';
+  const next = document.createElement('button'); next.textContent = 'Next';
+  const posEl = document.createElement('span'); posEl.className = 'pos';
+  const updatePos = () => { posEl.textContent = `${pos + 1} / ${list.length}`; };
+  updatePos();
+  prev.addEventListener('click', ev => { ev.stopPropagation(); openModal(list[(pos - 1 + list.length) % list.length]); });
+  next.addEventListener('click', ev => { ev.stopPropagation(); openModal(list[(pos + 1) % list.length]); });
+  nav.append(prev, next, posEl);
+  panel.appendChild(nav);
+  modal.appendChild(panel);
+  modal.onclick = (ev) => { if (ev.target === modal) closeModal(); };
+  panel.addEventListener('click', ev => ev.stopPropagation());
+}
+function toggleGroup() {
+  groupMode = !groupMode;
+  saveJSON(GROUP_KEY, groupMode);
+  groupBtn.textContent = groupMode ? 'Group recolors' : 'Flat view';
+  render();
+}
+search.addEventListener('input', render);
+catFilter.addEventListener('change', render);
+groupBtn.addEventListener('click', toggleGroup);
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { closeModal(); return; }
+  const typing = document.activeElement && ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName);
+  if (typing) return;
+  if (e.key === '/') { e.preventDefault(); search.focus(); return; }
+  if (e.key === 'g' || e.key === 'G') { toggleGroup(); return; }
+});
+render();
+</script></body></html>

@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sprite labeling</title>
+<style>
+{{ shared_css }}
+.grid{padding:14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px}
+.card{background:#22252b;border:1px solid #393d45;border-radius:8px;padding:10px;min-width:0}
+.card.deleted{border-color:#a33;background:#3a1a1a}
+.top{display:flex;gap:12px;align-items:center}
+.sprite{width:64px;height:64px;image-rendering:pixelated;object-fit:contain}
+.meta{flex:1;min-width:0}
+.id{font-weight:700}
+.current{color:#93d4a3;overflow-wrap:anywhere;min-height:1.3em}
+.field{margin-top:6px}
+.field input{width:100%}
+.category{width:100%}
+.name{width:100%}
+.candidates{display:flex;gap:7px;overflow-x:auto;margin-top:10px;padding-bottom:4px}
+.candidate{flex:0 0 82px;border:1px solid #454a54;border-radius:5px;padding:4px;text-align:center;font-size:11px;overflow:hidden}
+.candidate img{width:48px;height:48px;display:block;margin:auto;image-rendering:pixelated;object-fit:contain}
+.candidate button{font-size:10px;padding:4px 2px;width:100%;white-space:nowrap}
+.path{color:#aeb4c0;overflow-wrap:anywhere;margin-top:3px}
+.empty{color:#9aa1ad}
+.autocomplete{position:relative;display:inline-block;width:100%}
+.autocomplete-items{position:absolute;z-index:10;width:100%;border:1px solid #505661;border-top:none;border-radius:0 0 5px 5px;background:#262a33;display:none}
+.autocomplete-items div{padding:6px 8px;cursor:pointer;border-bottom:1px solid #393d45}
+.autocomplete-items div:last-child{border-bottom:none}
+.autocomplete-items div.highlight{background:#3b414b}
+.autocomplete-items div em{font-style:normal;color:#93d4a3;font-weight:700}
+</style></head><body><header><strong>Sprite label review</strong><input id="search" placeholder="Filter sprites, names, labels"><button id="next">Next unlabeled</button><button id="export">Export labels JSON</button><label>Import <input id="import" type="file" accept="application/json" hidden></label><span id="summary" class="status"></span></header><main id="grid" class="grid"></main>
+<script>
+{{ shared_js }}
+const sprites = {{ sprites|safe }};
+const initial = {{ labels|safe }};
+const categories = {{ categories|safe }};
+const key = 'sprite-labels-v1:' + location.pathname;
+let labels = { ...initial };
+try { labels = { ...labels, ...loadJSON(key) || {} } } catch (e) {}
+const grid = document.querySelector('#grid');
+const summary = document.querySelector('#summary');
+const search = document.querySelector('#search');
+function save() { saveJSON(key, labels); render() }
+function savelabels() { saveJSON(key, labels) }
+function asset(p) { return assetPath('{{ asset_prefix }}', p) }
+function focusInputAt(index) {
+  const inputs = [...document.querySelectorAll('.name')];
+  if (index >= 0 && index < inputs.length) {
+    inputs[index].focus();
+    inputs[index].select();
+  }
+}
+function deleteSprite(sid) {
+  const cur = labels[sid] || {};
+  labels[sid] = { ...cur, deleted: !cur.deleted };
+  savelabels();
+  render();
+  setTimeout(() => {
+    const inputs = [...document.querySelectorAll('.name')];
+    const i = inputs.findIndex(x => x.dataset.id === sid);
+    focusInputAt(i + 1);
+  }, 0);
+}
+window.addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'Delete') {
+    e.preventDefault();
+    const active = document.activeElement;
+    if (active && active.classList.contains('name')) {
+      deleteSprite(active.dataset.id);
+    }
+  }
+});
+function nameToCategory(name) {
+  const n = name.toLowerCase();
+  const w = ['sword','blade','katana','falchion','sabre','scimitar','cutlass','rapier','claymore','broadsword','longsword','shortsword','greatsword','estoc','zweihander'];
+  if (w.some(k => n.includes(k))) return 'weapons/swords';
+  const d = ['dagger','knife','stiletto','poniard','vampire_tooth'];
+  if (d.some(k => n.includes(k))) return 'weapons/daggers';
+  const c = ['club','mace','ankus','morningstar','morning_star','eveningstar','flanged_mace'];
+  if (c.some(k => n.includes(k))) return 'weapons/clubs';
+  const l = ['polearm','glaive','halberd','bardiche','trident','trishula','pike','lance','spear'];
+  if (l.some(k => n.includes(k))) return 'weapons/lances';
+  const r = ['bow','crossbow','xbow','arrow','bolt','javelin','shuriken','throw','sling','blowgun','tomahawk','rock','stone','dart','needle','boomerang'];
+  if (r.some(k => n.includes(k))) return 'weapons/ranged';
+  if (n.includes('axe')) return 'weapons/axes';
+  if (n.includes('hammer')) return 'weapons/hammers';
+  if (n.includes('flail') || n.includes('scourge')) return 'weapons/flails';
+  if (n.includes('whip')) return 'weapons/whips';
+  if (n.includes('scythe')) return 'weapons/scythes';
+  if (n.includes('staff') || n.includes('stave') || n.includes('lajatang') || n.includes('sceptre') || n.includes('wucad_mu')) return 'weapons/staves';
+  const a = ['helmet','headgear','helm','hat','crown','hood','circlet','mask'];
+  if (a.some(k => n.includes(k))) return 'armor/head';
+  if (n.includes('boot') || n.includes('shoe') || n.includes('sandal') || n.includes('sabaton')) return 'armor/boots';
+  if (n.includes('glove') || n.includes('gauntlet') || n.includes('mitt')) return 'armor/gloves';
+  if (n.includes('legging') || n.includes('greave') || n.includes('trousers') || n.includes('kilt') || n.includes('skirt')) return 'armor/legs';
+  if (n.includes('armour') || n.includes('armor') || n.includes('torso') || n.includes('robe') || n.includes('chainmail') || n.includes('plate') || n.includes('scale') || n.includes('leather') || n.includes('mail')) return 'armor/chest';
+  if (n.includes('shield')) return 'armor/shields';
+  const f = ['fruit','berry','apple','orange','banana','pear','plum'];
+  if (f.some(k => n.includes(k))) return 'food/fruit';
+  if (n.includes('fish')) return 'food/fish';
+  if (n.includes('meat') || n.includes('ham') || n.includes('bacon') || n.includes('jamon')) return 'food/meat';
+  if (n.includes('vegetable') || n.includes('lettuce') || n.includes('potato') || n.includes('carrot') || n.includes('onion')) return 'food/vegetable';
+  if (n.includes('potion')) return 'consumables/potions';
+  if (n.includes('scroll')) return 'consumables/scrolls';
+  if (n.includes('book')) return 'consumables/books';
+  if (n.includes('wand')) return 'magic/wands';
+  if (n.includes('gem') || n.includes('ruby') || n.includes('amethist') || n.includes('mineral') || n.includes('ingot')) return 'treasure/gems';
+  if (n.includes('ring') || n.includes('amulet') || n.includes('jewelry')) return 'treasure/jewelry';
+  if (n.includes('coin') || n.includes('currency') || n.includes('gold') || n.includes('silver') || n.includes('bronze')) return 'treasure/currency';
+  if (n.includes('key')) return 'treasure/keys';
+  if (n.includes('rune')) return 'treasure/runes';
+  if (n.includes('tool') || n.includes('ladder') || n.includes('shovel') || n.includes('tableware') || n.includes('storage')) return 'tools';
+  if (n.includes('accessory') || n.includes('cloak') || n.includes('ring')) return 'accessories';
+  if (n.includes('floor')) return 'environment/floor';
+  if (n.includes('wall')) return 'environment/walls';
+  if (n.includes('effect') || n.includes('blood')) return 'effects';
+  return 'other/unclassified';
+}
+function setupAutocomplete(input, options) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'autocomplete';
+  input.parentNode.insertBefore(wrapper, input);
+  wrapper.appendChild(input);
+  const list = document.createElement('div');
+  list.className = 'autocomplete-items';
+  wrapper.appendChild(list);
+  let selected = -1;
+  function show(matches) {
+    list.innerHTML = '';
+    selected = -1;
+    if (!matches.length) { list.style.display = 'none'; return; }
+    matches.forEach(m => {
+      const d = document.createElement('div');
+      d.innerHTML = markup(m.opt, m.marks);
+      d.title = m.opt;
+      d.addEventListener('mousedown', ev => {
+        ev.preventDefault();
+        input.value = m.opt;
+        const sid = input.dataset.id;
+        labels[sid] = { ...labels[sid], category: m.opt };
+        save();
+        list.style.display = 'none';
+      });
+      list.appendChild(d);
+    });
+    list.style.display = 'block';
+  }
+  function navigate(delta) {
+    const items = list.querySelectorAll('div');
+    if (!items.length) return;
+    selected += delta;
+    if (selected < 0) selected = 0;
+    if (selected >= items.length) selected = items.length - 1;
+    items.forEach((it, ix) => it.classList.toggle('highlight', ix === selected));
+  }
+  function apply() {
+    const items = list.querySelectorAll('div');
+    if (items.length && selected >= 0) {
+      const m = fuzzyFilter(input.value, options)[selected];
+      if (m) {
+        input.value = m.opt;
+        const sid = input.dataset.id;
+        labels[sid] = { ...labels[sid], category: m.opt };
+        save();
+      }
+    }
+    list.style.display = 'none';
+  }
+  input.addEventListener('input', () => {
+    const sid = input.dataset.id;
+    labels[sid] = { ...labels[sid], category: input.value };
+    savelabels();
+    show(fuzzyFilter(input.value, options));
+  });
+  input.addEventListener('blur', () => {
+    apply();
+    setTimeout(() => { list.style.display = 'none' }, 120);
+    savelabels();
+  });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); navigate(1) }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); navigate(-1) }
+    else if (e.key === 'Enter') { e.preventDefault(); const id = input.dataset.id; const inputs = [...document.querySelectorAll('.name')]; const i = inputs.findIndex(x => x.dataset.id === id); apply(); savelabels(); focusInputAt(i + 1); }
+    else if (e.key === 'Tab') { e.preventDefault(); const id = input.dataset.id; const inputs = [...document.querySelectorAll('.name')]; const i = inputs.findIndex(x => x.dataset.id === id); apply(); savelabels(); focusInputAt(i + (e.shiftKey ? -1 : 1)); }
+  });
+}
+function setLabel(id, candidate) {
+  const old = labels[id] || {};
+  labels[id] = { ...old, reference: candidate.path, name: candidate.name, category: candidate.category };
+  save();
+}
+function render() {
+  const q = search.value.toLowerCase();
+  grid.replaceChildren();
+  const shown = sprites.filter(s => {
+    const label = labels[s.id] || {};
+    return !q || s.id.toLowerCase().includes(q) || (label.name || '').toLowerCase().includes(q) || (label.reference || '').toLowerCase().includes(q) || (label.category || '').toLowerCase().includes(q);
+  });
+  summary.textContent = `${Object.keys(labels).length} labeled / ${sprites.length} sprites · ${shown.length} shown`;
+  for (const sprite of shown) {
+    const label = labels[sprite.id] || {};
+    const card = document.createElement('section');
+    card.className = 'card' + (label.deleted ? ' deleted' : '');
+    const top = document.createElement('div');
+    top.className = 'top';
+    const image = document.createElement('img');
+    image.className = 'sprite checker';
+    image.src = asset(sprite.path);
+    image.loading = 'lazy';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const id = document.createElement('div');
+    id.className = 'id';
+    id.textContent = sprite.id;
+    const current = document.createElement('div');
+    current.className = 'current';
+    current.textContent = label.reference || 'Unlabeled';
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'name';
+    nameInput.placeholder = 'name / category (e.g. long_sword, weapons/swords)';
+    nameInput.value = label.name || label.category || '';
+    nameInput.dataset.id = sprite.id;
+    nameInput.addEventListener('input', () => {
+      const sid = nameInput.dataset.id;
+      labels[sid] = { ...labels[sid], name: nameInput.value, deleted: false };
+      savelabels();
+    });
+    nameInput.addEventListener('blur', savelabels);
+    nameInput.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== 'Tab') return;
+      e.preventDefault();
+      const sid = nameInput.dataset.id;
+      labels[sid] = { ...labels[sid], name: nameInput.value, deleted: false };
+      savelabels();
+      setTimeout(() => {
+        const inputs = [...document.querySelectorAll('.name')];
+        const i = inputs.findIndex(x => x.dataset.id === sid);
+        focusInputAt(i + (e.key === 'Tab' && e.shiftKey ? -1 : 1));
+      }, 0);
+    });
+    meta.append(id, current, nameInput);
+    top.append(image, meta);
+    card.append(top);
+    const candidates = document.createElement('div');
+    candidates.className = 'candidates';
+    for (const candidate of sprite.candidates) {
+      const item = document.createElement('div');
+      item.className = 'candidate';
+      const ref = document.createElement('img');
+      ref.className = 'checker';
+      ref.src = asset(candidate.path);
+      ref.loading = 'lazy';
+      const score = document.createElement('div');
+      score.textContent = `${Math.round(candidate.score * 100)}%`;
+      const button = document.createElement('button');
+      button.textContent = 'Use reference';
+      button.addEventListener('click', () => setLabel(sprite.id, candidate));
+      const path = document.createElement('div');
+      path.className = 'path';
+      path.textContent = candidate.path.replace('dcss/', '');
+      item.append(ref, score, button, path);
+      candidates.append(item);
+    }
+    card.append(candidates);
+    grid.append(card);
+  }
+}
+search.addEventListener('input', render);
+document.querySelector('#next').addEventListener('click', () => {
+  const unlabeled = sprites.find(s => !labels[s.id]?.reference);
+  if (unlabeled) { search.value = unlabeled.id; render(); document.querySelector('.card')?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }
+});
+document.querySelector('#export').addEventListener('click', () => {
+  downloadFile({{ download_name|tojson }}, { version: 1, labels });
+});
+document.querySelector('#import').addEventListener('change', async event => {
+  try {
+    const data = JSON.parse(await event.target.files[0].text());
+    if (!data.labels || typeof data.labels !== 'object') throw Error('Missing labels object');
+    labels = { ...labels, ...data.labels };
+    save();
+  } catch (error) { alert('Could not import labels JSON: ' + error.message) }
+  event.target.value = '';
+});
+render();
+</script></body></html>

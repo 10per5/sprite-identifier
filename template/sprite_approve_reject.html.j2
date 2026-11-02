@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sprite approve/reject pass</title>
+<style>
+{{ shared_css }}
+main{padding:18px;max-width:900px;margin:0 auto}
+.sprite-wrap{display:flex;gap:20px;align-items:flex-start}
+.single{width:256px;height:256px;background:#1c1f26;border:2px solid #444;border-radius:8px;position:relative;overflow:hidden;image-rendering:pixelated;flex:none}
+.single img{width:100%;height:100%;object-fit:contain;display:block}
+.prev{position:absolute;inset:0;pointer-events:none;opacity:0.35;z-index:2}
+.prev img{width:100%;height:100%;object-fit:contain;filter:grayscale(1) opacity(0.5)}
+.meta{flex:1;min-width:0;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.controls{margin-top:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.decision{font-size:20px;font-weight:700;margin-right:12px}
+.decision.yes{color:#3d5af1}.decision.no{color:#a33}
+.rejected{background:#3a1a1a;border-color:#7a2222}
+.approved{background:#1a3a1a;border-color:#227a22}
+</style></head><body>
+<header>
+<h1>Sprite approve/reject pass</h1>
+<div class="status" id="status">Loading…</div>
+<button id="save">Save JSON</button>
+<button id="export">Export</button>
+<button id="prev-sprite" style="margin-left:auto">Prev sprite</button>
+<button id="next-sprite">Next sprite</button>
+</header>
+<main>
+<div class="sprite-wrap">
+<div class="single" id="sprite-img"><img id="sprite-img-img"><div class="prev" id="prev-img"></div></div>
+<div class="meta">
+<div class="field"><label>id</label><input id="f-id" readonly></div>
+<div class="field" id="field-name"><label>name</label><input id="f-name"></div>
+<div class="field" id="field-category"><label>category</label><input id="f-category"></div>
+<div class="field" id="field-subcategory"><label>subcategory</label><input id="f-subcategory"></div>
+<div class="field" id="field-tags"><label>tags</label><textarea id="f-tags" rows="2" placeholder="comma separated"></textarea></div>
+<div class="field"><label>vllm name</label><input id="f-vname" readonly></div>
+<div class="field"><label>vllm category</label><input id="f-vcategory" readonly></div>
+<div class="field"><label>vllm tags</label><textarea id="f-vtags" rows="2" readonly></textarea></div>
+<div class="field"><label>pixel hash</label><input id="f-hash" readonly></div>
+<div class="taglist" id="tags"></div>
+<div class="keyhint">Y = approve · N = reject · ArrowRight = next · ArrowLeft = prev · Esc = unfocus · Ctrl+S = save</div>
+</div>
+</div>
+<div class="controls">
+<div class="decision" id="decision">—</div>
+<button id="btn-yes" class="primary">Y Approve</button>
+<button id="btn-no" class="danger">N Reject</button>
+<div class="summary" id="summary"></div>
+</div>
+<div id="msg" style="margin-top:8px;color:#8a91ad"></div>
+<div id="stale-warning" class="hidden" style="margin-top:10px;padding:10px 12px;border:1px solid #a06a00;background:#2a210f;border-radius:6px;color:#f0c36d;font-size:13px;line-height:1.45"></div>
+</main>
+<script>
+{{ shared_js }}
+const SPRITES = {{ sprites }};
+const SAVED_DECISIONS = {{ decisions }};
+const CATEGORIES = {{ categories }};
+const key = 'sprite-review-approval:'+location.pathname;
+let stored = {};
+try{stored = loadJSON(key) || {}}catch(e){}
+// Decisions exported to JSON first, then unsaved localStorage edits on top.
+let decisions = Object.assign({}, SAVED_DECISIONS, stored);
+const CURRENT_IDS = new Set(SPRITES.map(s=>s.id));
+const STALE_IDS = Object.keys(decisions).filter(id=>!CURRENT_IDS.has(id)).sort();
+let idx = 0;
+let orig = {};
+const img = document.querySelector('#sprite-img-img');
+const prevImg = document.querySelector('#prev-img img');
+const prevWrap = document.querySelector('#prev-img');
+const f = {id:document.querySelector('#f-id'),name:document.querySelector('#f-name'),category:document.querySelector('#f-category'),subcategory:document.querySelector('#f-subcategory'),tags:document.querySelector('#f-tags'),vname:document.querySelector('#f-vname'),vcategory:document.querySelector('#f-vcategory'),vtags:document.querySelector('#f-vtags'),hash:document.querySelector('#f-hash')};
+const decisionEl = document.querySelector('#decision');
+const statusEl = document.querySelector('#status');
+const summaryEl = document.querySelector('#summary');
+const msgEl = document.querySelector('#msg');
+const taglist = document.querySelector('#tags');
+
+function saveLocal(){saveJSON(key, decisions)}
+function decisionOf(d){return d&&typeof d==='object'?d.decision:d;}
+function statusText(){
+const vals = SPRITES.map(s=>decisions[s.id]).filter(Boolean);
+const yes = vals.filter(d=>decisionOf(d)==='y').length;
+const no = vals.filter(d=>decisionOf(d)==='n').length;
+const done = yes + no;
+const stale = STALE_IDS.length ? ` · ${STALE_IDS.length} stale` : '';
+return `${done} / ${SPRITES.length} decided · ${yes} approved · ${no} rejected${stale}`;
+}
+function showStaleWarning(){
+const el = document.querySelector('#stale-warning');
+if(!STALE_IDS.length){el.classList.add('hidden');return;}
+const preview = STALE_IDS.slice(0,8).join(', ') + (STALE_IDS.length>8?' …':'');
+el.classList.remove('hidden');
+el.textContent = `⚠ ${STALE_IDS.length} saved decision(s) are for sprites that are not in this review set and are ignored by the counters: ${preview}. They are kept in localStorage and in the exported JSON.`;
+}
+function render(){
+if(idx<0)idx=0;if(idx>=SPRITES.length)idx=SPRITES.length-1;
+const s = SPRITES[idx];
+const d = decisions[s.id]||{};
+img.src = assetPath('{{ asset_prefix }}', s.path);
+f.id.value=s.id;f.name.value=d.name||s.name||'';f.category.value=d.category||s.category||'';f.subcategory.value=d.subcategory||s.subcategory||'';
+f.tags.value=(d.tags||s.tags||[]).join(', ');f.vname.value=s.vllm_name||'';f.vcategory.value=s.vllm_category||'';
+f.vtags.value=(s.vllm_tags||[]).join(', ');f.hash.value=s.pixel_hash||'';
+orig = {name:f.name.value,category:f.category.value,subcategory:f.subcategory.value,tags:f.tags.value};
+syncModified();
+prevWrap.innerHTML='';
+if(idx>0){
+const p=SPRITES[idx-1];
+const pi=document.createElement('img');pi.src=assetPath('{{ asset_prefix }}', p.path);prevWrap.appendChild(pi);
+prevWrap.style.display='block';
+}else{prevWrap.style.display='none';}
+decisionEl.textContent = d.decision==='y'?'APPROVED':(d.decision==='n'?'REJECTED':'—');
+decisionEl.className='decision'+(d.decision==='y'?' yes':(d.decision==='n'?' no':''));
+statusEl.textContent=statusText();
+summaryEl.textContent=`Sprite ${idx+1} of ${SPRITES.length}`;
+msgEl.textContent='';
+taglist.innerHTML='';
+(tagsFor(s)).forEach(t=>{const el=document.createElement('span');el.className='tag';el.textContent=t;taglist.appendChild(el)});
+}
+function tagsFor(s){const t=[];if(s.category)t.push(s.category.split('/').pop());if(s.tags&&Array.isArray(s.tags))t.push(...s.tags);return t;}
+function decisionObj(v){
+const s=SPRITES[idx];
+return {
+decision: v,
+name: f.name.value,
+category: f.category.value,
+subcategory: f.subcategory.value,
+tags: f.tags.value.split(',').map(x=>x.trim()).filter(Boolean),
+pixel_hash: s.pixel_hash||'',
+source: 'manual'
+};
+}
+function applyDecision(v){
+if(idx<0||idx>=SPRITES.length)return;
+const s=SPRITES[idx];decisions[s.id]=decisionObj(v);saveLocal();
+const el=document.querySelector('#sprite-img');
+if(v==='y')el.classList.add('approved'),el.classList.remove('rejected');
+else if(v==='n')el.classList.add('rejected'),el.classList.remove('approved');
+render();
+idx++;
+if(idx>=SPRITES.length){msgEl.textContent='All sprites decided.';return;}
+render();
+}
+function setManual(){
+if(idx<0||idx>=SPRITES.length)return;
+const s=SPRITES[idx];
+const existing=decisions[s.id];
+let decision=null;
+if(existing&&existing.decision)decision=existing.decision;
+else if(existing==='y')decision='y';
+else if(existing==='n')decision='n';
+decisions[s.id]={decision,name:f.name.value,category:f.category.value,subcategory:f.subcategory.value,tags:f.tags.value.split(',').map(x=>x.trim()).filter(Boolean),pixel_hash:s.pixel_hash||'',source:'manual'};
+saveLocal();
+}
+function syncModified(){
+['name','category','subcategory','tags'].forEach(k=>{
+const el=document.querySelector('#field-'+k);
+const changed = (f[k].value||'') !== (orig[k]||'');
+el.classList.toggle('modified', changed);
+});
+}
+document.querySelector('#btn-yes').onclick=()=>{applyDecision('y');};
+document.querySelector('#btn-no').onclick=()=>{applyDecision('n');};
+document.querySelector('#next-sprite').onclick=()=>{setManual();idx++;if(idx>=SPRITES.length){msgEl.textContent='All sprites decided.';return;}render();};
+document.querySelector('#prev-sprite').onclick=()=>{idx--;if(idx<0)idx=0;render();};
+document.querySelector('#save').onclick=()=>{setManual();downloadFile({{ download_name|tojson }}, {version:1, decisions});msgEl.textContent='Saved '+{{ download_name|tojson }};};
+document.querySelector('#export').onclick=document.querySelector('#save').onclick;
+[f.name,f.category,f.subcategory,f.tags].forEach(el=>el.addEventListener('input',()=>{setManual();syncModified();}));
+window.addEventListener('keydown',e=>{
+if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();document.querySelector('#save').click();return;}
+if(e.key==='Escape'){e.preventDefault();const active=document.activeElement;if(active&&typeof active.blur==='function')active.blur();setManual();msgEl.textContent='Unfocused — Y/N shortcuts active';return;}
+const active=document.activeElement;
+const typing=active&&(active.tagName==='INPUT'||active.tagName==='TEXTAREA');
+if(!typing&&(e.key==='y'||e.key==='Y')){e.preventDefault();applyDecision('y');return;}
+if(!typing&&(e.key==='n'||e.key==='N')){e.preventDefault();applyDecision('n');return;}
+if(e.key==='ArrowRight'){e.preventDefault();setManual();idx++;if(idx>=SPRITES.length){msgEl.textContent='All sprites decided.';return;}render();return;}
+if(e.key==='ArrowLeft'){e.preventDefault();idx--;if(idx<0)idx=0;render();return;}
+});
+showStaleWarning();
+render();
+</script></body></html>
