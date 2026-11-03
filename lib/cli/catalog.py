@@ -77,6 +77,25 @@ def _free_png_path(dest_dir, name):
     return dest_png
 
 
+def index_catalogued_hashes(target_root):
+    """Return ``{pixel_hash: png_path}`` for every asset already in the catalogue."""
+    found = {}
+    for toml_path in sorted(Path(target_root).rglob("*.toml")):
+        if toml_path.name == "catalog.toml":
+            continue
+        png = toml_path.with_suffix(".png")
+        if not png.exists():
+            continue
+        try:
+            with open(toml_path, "rb") as handle:
+                phash = tomllib.load(handle).get("pixel_hash")
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        if phash:
+            found.setdefault(phash, png)
+    return found
+
+
 def write_catalog_index(target_root, domain):
     """Rewrite ``catalog.toml`` from every per-sprite TOML under ``target_root``.
 
@@ -174,13 +193,17 @@ def build_catalog(args):
                 issues.append("base_blocked")
         return issues
 
-    moved = skipped = 0
+    catalogued = index_catalogued_hashes(target_root)
+    moved = skipped = already = 0
     recolor_count = 0
     blocked = []
     built_names = {}
 
     def promote(phash, entry, *, variant):
-        nonlocal moved, skipped, recolor_count
+        nonlocal moved, skipped, already, recolor_count
+        if phash in catalogued:
+            already += 1
+            return
         src = sources_by_hash.get(phash)
         if src is None or not src.exists():
             skipped += 1
@@ -205,6 +228,7 @@ def build_catalog(args):
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_png = _free_png_path(dest_dir, name)
         _promote_image(src, dest_png, copy=copy)
+        catalogued[phash] = dest_png
         moved += 1
         built_names.setdefault((category, name), []).append(dest_png.stem)
 
@@ -247,6 +271,7 @@ def build_catalog(args):
     print(f"  Base images: {moved - recolor_count}")
     print(f"  Recolor variants: {recolor_count}")
     print(f"  Not in source folder(s): {skipped}")
+    print(f"  Already catalogued (skipped): {already}")
     print(f"Master index: {catalog_path_out} ({indexed} entries)")
 
     duplicates = {key: stems for key, stems in built_names.items() if len(stems) > 1}
