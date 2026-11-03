@@ -131,6 +131,7 @@ All commands are `python3 sprite.py <command> [options]`.
 | `review-approval` | Single-sprite Y/N approve/reject page (post-AI), writes decisions JSON |
 | `move-approved` | Commit manual edits (and the approve/reject decision) to metadata, then move approved sprites into the domain's approved folder |
 | `build` | Assemble the catalogued library (`out/@items/`) + `catalog.toml`; blocks entries that fail the readiness gate |
+| `recategorize` | Re-judge catalogue categories with the LLM (category only, current one hidden), report before/after split, `--apply` moves confident ones; writes an old→new id map, `--undo` reverses |
 | `revert` | Move catalogue assets that fail the gate back to the input folder (dry-run unless `--apply`; `--from-manifest` undoes) |
 | `viewer` | Browse the built catalogue (`out/@items` / `out/@spells`) as an offline HTML page |
 | `guided` | Launch the interactive 0-to-hero wizard for the selected domain (also the default with no args) |
@@ -246,6 +247,30 @@ responses it is left for the approve/reject page.
 `catalog.toml` is regenerated from every per-sprite TOML in the catalogue, so
 assets from earlier runs stay indexed. Each record has a unique `id`
 (`<category>/<file stem>`) even when two assets share a `name`.
+
+### Rebalancing categories (`recategorize`)
+
+The first spell pass filed 900 of 1133 icons under `offensive/`: a filename
+heuristic called every elemental icon an attack and the model agreed with it.
+The prompts now carry category rules (an element alone never means offensive),
+the vision pass gets no category hint, and `recategorize` re-judges what is
+already catalogued:
+
+```bash
+python3 sprite.py recategorize --domain spells --category offensive --limit 50   # quick sample
+python3 sprite.py recategorize --domain spells --category offensive              # all of them
+python3 sprite.py recategorize --domain spells --from-proposals out/spells/recategorize-<stamp>.json --apply
+python3 sprite.py recategorize --domain spells --undo out/spells/recategorize-moves-<stamp>.json --apply
+```
+
+Proposing never moves files. It saves `out/spells/recategorize-<stamp>.json`
+and prints a now/after table per category. `--apply` moves proposals with
+`confidence >= --min-confidence` (default 0.7), along with their recolor
+variants, and updates metadata and `catalog.toml`. Edit `"accept": true/false`
+on a proposal to override the threshold by hand. Moves change `file`/`id` in
+`catalog.toml` but never `pixel_hash`; each apply writes
+`recategorize-moves-<stamp>.json` (old id → new id) for anything downstream
+that references paths.
 
 ### Undoing bad promotions (`revert`)
 

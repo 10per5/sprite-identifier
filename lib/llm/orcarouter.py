@@ -154,9 +154,11 @@ def call_vllm(api_key, data_uri, sprite_id, category, name, debug=False, retries
                         "subcategory": "", "tags": [], "confidence": None,
                         "notes": f"error: empty response after {retries + 1} attempts"}
             result = json.loads(content)
+            # Only what the model said: falling back to the hints here used to
+            # launder filenames (`Icon43`) and heuristic categories into labels.
             return {
-                "name": result.get("name", name or sprite_id),
-                "category": result.get("category", category or "other"),
+                "name": result.get("name", ""),
+                "category": result.get("category", ""),
                 "subcategory": result.get("subcategory", ""),
                 "tags": result.get("tags", []),
                 "confidence": result.get("confidence"),
@@ -171,8 +173,8 @@ def call_vllm(api_key, data_uri, sprite_id, category, name, debug=False, retries
             if salvaged:
                 print(f"    Salvaged: {salvaged}")
                 return {
-                    "name": salvaged.get("name", name or sprite_id),
-                    "category": salvaged.get("category", category or "other"),
+                    "name": salvaged.get("name", ""),
+                    "category": salvaged.get("category", ""),
                     "subcategory": salvaged.get("subcategory", ""),
                     "tags": salvaged.get("tags", []),
                     "confidence": salvaged.get("confidence"),

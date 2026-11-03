@@ -79,6 +79,29 @@ def _tag_vocabulary():
 
 
 _CATEGORIES = ", ".join(SPELL_TAXONOMY["categories"])
+
+# Decision rules for the category. Without them the model defaulted to
+# "offensive" (900 of 1133 catalogued icons), mostly by agreeing with a
+# filename hint that called every elemental icon an attack.
+CATEGORY_GUIDE = """Category = the spell's main PURPOSE, not its element or look:
+  offensive   direct damage to enemies (bolts, blasts, strikes, explosions)
+  defensive   protects: shields, barriers, wards, damage reduction, walls that block
+  healing     restores health, revives, cleanses ailments
+  buff        strengthens self/allies: haste, empower, rage, auras, blessings
+  debuff      weakens enemies over time: curses, poison/bleed/burn, fear, blind, slow, armor break
+  control     disables or moves enemies: stun, freeze, root, sleep, charm, knockback, traps
+  summoning   brings a creature or object: minions, pets, demons, totems, undead
+  movement    moves the caster: teleport, blink, dash, leap, flight
+  utility     stealth, invisibility, transform, dispel, light, crafting, other non-combat
+  divination  reveals or senses: detect, scry, see invisible, insight
+  other       none of the above
+Rules:
+  - An element alone is never a reason for "offensive": fire can be a wall,
+    an aura, a buff or a summon.
+  - Pick offensive only when dealing damage is clearly the main effect; if it
+    mainly curses, weakens or disables, prefer debuff or control.
+  - A creature, face or entity on the icon usually means summoning (or debuff
+    for fear/gaze effects), not offensive."""
 _SUBCATEGORIES = ", ".join(SPELL_TAXONOMY["subcategories"])
 
 # Shared reply contract. Key order matters: replies that get cut off lose the
@@ -90,6 +113,8 @@ _REPLY_RULES = f"""Return ONLY one JSON object, keys in this order:
   - tags: 3 to 10 lowercase tags, preferably from the vocabulary below
   - confidence: float 0-1
   - notes: optional, at most 12 words (or "")
+
+{CATEGORY_GUIDE}
 
 Tag vocabulary:
 {_tag_vocabulary()}
@@ -110,12 +135,14 @@ Describe the magical effect, not a physical item.
 {_REPLY_RULES}"""
 
 
+# The vision pass gets no category hint: the filename heuristic anchored the
+# model (it agreed with it 895/895 times for "offensive").
 USER_PROMPT_TEMPLATE = """Pack folder: {pack}
 Filename: {filename}
-Category hint (heuristic, may be wrong): {category}
 Name hint (from the filename, may be meaningless): {name}
 
-Name, categorise and tag the spell shown in the image. JSON only."""
+Name, categorise and tag the spell shown in the image. Judge the category from
+the image using the category rules. JSON only."""
 
 
 TEXT_SYSTEM_PROMPT = f"""You are an expert at identifying pixel-art spell and ability icons from fantasy RPGs.
@@ -130,10 +157,45 @@ Describe a magical effect, not a physical item.
 
 TEXT_USER_PROMPT_TEMPLATE = """Pack folder: {pack}
 Filename: {filename}
-Category hint (heuristic, may be wrong): {category}
+Category guess from filename keywords (weak, often wrong; ignore if it
+conflicts with the rules): {category}
 Name hint: {name}
 
 No image is provided. Name, categorise and tag the spell from these hints. JSON only."""
+
+
+# `recategorize`: re-judge only the category of an already catalogued icon.
+# The current category is deliberately NOT shown, so the model can't anchor
+# on it. call_vllm parses the usual keys; only category/confidence/notes are
+# used.
+RECATEGORIZE_SYSTEM_PROMPT = f"""You are an expert at classifying pixel-art spell and ability icons from fantasy RPGs.
+Decide the spell's category only.
+
+{CATEGORY_GUIDE}
+
+Return ONLY one JSON object, keys in this order:
+  - category: exactly one of: {_CATEGORIES}
+  - confidence: float 0-1 (how sure you are of the category)
+  - notes: at most 12 words explaining the choice
+No markdown fences, no text before or after the JSON."""
+
+RECATEGORIZE_USER_TEMPLATE = """Pack folder: {pack}
+Spell name: {name}
+Element/school: {subcategory}
+Tags: {tags}
+
+Which category fits this spell's main purpose? JSON only."""
+
+RECATEGORIZE_TEXT_SYSTEM_PROMPT = RECATEGORIZE_SYSTEM_PROMPT.replace(
+    "Decide the spell's category only.",
+    "You are NOT shown the image; decide the spell's category only, from its name and tags.")
+
+SPELL_RECATEGORIZE_PROMPTS = PromptSet(
+    vision_system=RECATEGORIZE_SYSTEM_PROMPT,
+    vision_user=RECATEGORIZE_USER_TEMPLATE,
+    text_system=RECATEGORIZE_TEXT_SYSTEM_PROMPT,
+    text_user=RECATEGORIZE_USER_TEMPLATE,
+)
 
 
 SPELL_PROMPTS = PromptSet(
@@ -212,10 +274,9 @@ _FUNCTION_WORDS = {
     "offensive": (
         "attack", "strike", "blast", "bolt", "missile", "arrow", "sword",
         "spear", "axe", "punch", "kick", "claw", "bite", "beam", "wave",
-        "meteor", "nova", "orb", "shard", "spike", "blade", "explosion",
-        "burst", "fire", "flame", "ice", "frost", "lightning", "thunder",
-        "poison", "acid", "damage", "shot", "projectile", "hit", "slash",
-        "pierce", "crush", "ray", "storm", "rain", "hail", "quake",
+        "meteor", "nova", "shard", "spike", "blade", "explosion",
+        "burst", "damage", "shot", "projectile", "hit", "slash",
+        "pierce", "crush", "ray",
     ),
     "utility": (
         "dispel", "cleanse", "light", "lock", "unlock", "open", "close",
@@ -393,11 +454,11 @@ def classify(relative_path):
             if subcategory:
                 break
 
-    # Spell icons are usually active effects; if only an element is known, treat
-    # it as an offensive spell. Otherwise fall back to utility.
-    if not category_hint:
-        category_hint = "offensive" if subcategory else "utility"
-    return category_hint, subcategory or ""
+    # No function word → no category guess. An element alone says nothing
+    # about purpose (the old "element → offensive" fallback is why most of the
+    # catalogue landed in offensive/); the LLM or a human decides, and `build`
+    # blocks the entry until one does.
+    return category_hint or "", subcategory or ""
 
 
 SPELL_DOMAIN = Domain(
@@ -422,6 +483,7 @@ SPELL_DOMAIN = Domain(
     prompts=SPELL_PROMPTS,
     classify=classify,
     category_aliases=SPELL_CATEGORY_ALIASES,
+    recategorize_prompts=SPELL_RECATEGORIZE_PROMPTS,
     recursive=True,
     extensions=(".png", ".jpg", ".jpeg"),
     default_source="spellicon",

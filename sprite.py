@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.cli import normalize, split, dedup, catalog, label, infer, index, review, view, revert
+from lib.cli import normalize, split, dedup, catalog, label, infer, index, review, view, revert, recategorize
 from lib.domains import DOMAINS, add_domain_argument
 from lib.wizard import run_wizard
 
@@ -46,7 +46,7 @@ asset domains:
   --domain spells   in/spellicon + in/spellicon-named  -> out/@spells
 
 domain-aware commands:
-  build, revert, index, label, infer, review-label, review-approval, move-approved, guided
+  build, revert, recategorize, index, label, infer, review-label, review-approval, move-approved, guided
 
 generic / item-only commands:
   normalize, split, dedup, auto-name
@@ -61,6 +61,7 @@ examples:
   python3 sprite.py review-approval --domain spells --sprites in/spellicon
   python3 sprite.py move-approved --domain spells
   python3 sprite.py revert --domain spells            # dry-run: flagged catalogue assets
+  python3 sprite.py recategorize --domain spells --category offensive --limit 50
 """,
     )
     parser.add_argument(
@@ -77,7 +78,7 @@ examples:
         required=False,
     )
 
-    for mod in (normalize, split, dedup, catalog, label, infer, index, review, view, revert):
+    for mod in (normalize, split, dedup, catalog, label, infer, index, review, view, revert, recategorize):
         mod.register(sub)
 
     p = sub.add_parser(

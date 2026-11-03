@@ -209,9 +209,10 @@ def run_llm_pass(
             model_used = result.get("model_used")
             used_tag = f" [{model_used}]" if model_used and model_used != model else ""
             if complete:
-                head = entry.get("name") or entry.get("category") or ""
+                where = "/".join(x for x in (entry.get("category"), entry.get("subcategory")) if x)
                 tags_preview = ", ".join((entry.get("tags") or [])[:4])
-                print(f"  [{done}/{total}] {sprite_id} ({phash}) → {head} | {tags_preview}{used_tag}")
+                print(f"  [{done}/{total}] {sprite_id} ({phash}) → {entry.get('name') or ''} "
+                      f"[{where}] | {tags_preview}{used_tag}")
             else:
                 missing = ", ".join((entry.get("vllm_last") or {}).get("missing", []))
                 cut = " — reply hit max_tokens" if result.get("finish_reason") == "length" else ""

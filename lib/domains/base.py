@@ -61,6 +61,9 @@ class Domain:
     # Short/variant spellings the LLM (or a human) uses for a category, e.g.
     # ``{"off": "offensive"}``. Applied by ``lib.core.quality``.
     category_aliases: dict[str, str] = field(default_factory=dict)
+    # Category-only prompts used by `recategorize` to re-judge catalogued
+    # assets. ``None`` means the domain does not support that pass.
+    recategorize_prompts: PromptSet | None = None
 
     # Scan/source behaviour --------------------------------------------------
     recursive: bool = False
