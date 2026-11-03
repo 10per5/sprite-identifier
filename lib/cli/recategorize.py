@@ -111,6 +111,26 @@ def _print_summary(proposals, target_root, min_confidence):
               f"on a proposal (or lower --min-confidence) to move them.")
 
 
+def _earlier_judgments(meta_dir, domain, model):
+    """``pixel_hash -> proposal`` from earlier proposals files, newest wins.
+
+    The model sees only the image, so its answer for an icon stays valid across
+    runs (same model); only answers with a usable category are reused.
+    """
+    found = {}
+    for path in sorted(meta_dir.glob("recategorize-2*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("domain") != domain.key or data.get("model") != model:
+            continue
+        for proposal in data.get("proposals", []):
+            if proposal.get("pixel_hash") and proposal.get("proposed"):
+                found[proposal["pixel_hash"]] = proposal
+    return found
+
+
 def _propose(args, domain, target_root, meta_path, proposals_path):
     api_key = os.environ.get("ORCAROUTER_API_KEY")
     if not api_key:
@@ -122,17 +142,51 @@ def _propose(args, domain, target_root, meta_path, proposals_path):
     entries = load_metadata(meta_path)["entries"]
     categories = set(args.category or [])
     records = list(_base_records(target_root, categories))
-    if args.limit:
-        records = records[:args.limit]
     if not records:
         raise SystemExit("No catalogue assets match --category.")
-    print(f"Judging {len(records)} asset(s) with {args.model} "
-          f"({'vision' if not args.text else 'text-only'}), est. "
-          f"~${len(records) * COST_PER_SPRITE:.2f}")
 
     report = {"domain": domain.key, "created": time.strftime("%Y%m%d-%H%M%S"),
               "model": args.model, "categories": sorted(categories),
               "proposals": []}
+    proposals = report["proposals"]
+
+    # Carry earlier answers into this report instead of paying to re-ask.
+    earlier = {} if args.rejudge else _earlier_judgments(
+        meta_path.parent, domain, args.model)
+    todo = []
+    for png, toml_path, record in records:
+        old = earlier.get(record.get("pixel_hash"))
+        if old:
+            proposals.append({**old, "file": png.relative_to(target_root).as_posix(),
+                              "name": record.get("name"),
+                              "current": record.get("category")})
+        else:
+            todo.append((png, toml_path, record))
+    if proposals:
+        print(f"Reusing {len(proposals)} earlier judgment(s); "
+              f"--rejudge to ask the model again.")
+    records = todo[:args.limit] if args.limit else todo
+    if not records:
+        atomic_save(report, proposals_path)
+        print(f"Nothing new to judge.\nProposals: {_rel(proposals_path)}")
+        return report
+    print(f"Judging {len(records)} asset(s) with {args.model} "
+          f"({'vision' if not args.text else 'text-only'}), est. "
+          f"~${len(records) * COST_PER_SPRITE:.2f}")
+
+    try:
+        _judge(records, args, domain, entries, api_key, report, proposals_path)
+    except KeyboardInterrupt:
+        atomic_save(report, proposals_path)
+        print(f"\nInterrupted; {len(proposals)} proposal(s) saved to "
+              f"{_rel(proposals_path)}. Rerun to continue where it stopped.")
+        raise SystemExit(130)
+    atomic_save(report, proposals_path)
+    print(f"\nProposals: {_rel(proposals_path)}")
+    return report
+
+
+def _judge(records, args, domain, entries, api_key, report, proposals_path):
     proposals = report["proposals"]
     for i, (png, _toml_path, record) in enumerate(records, 1):
         entry = entries.get(record.get("pixel_hash")) or {}
@@ -172,9 +226,6 @@ def _propose(args, domain, target_root, meta_path, proposals_path):
         if i % 10 == 0:
             atomic_save(report, proposals_path)
         time.sleep(args.sleep)
-    atomic_save(report, proposals_path)
-    print(f"\nProposals: {_rel(proposals_path)}")
-    return report
 
 
 def _move_asset(png, toml_path, dest_dir, new_category):
@@ -322,6 +373,9 @@ def register(subparsers):
                    help="judge at most N assets (quick sample)")
     p.add_argument("--min-confidence", type=float, default=0.7, metavar="X",
                    help="only move proposals at or above this confidence (default 0.7)")
+    p.add_argument("--rejudge", action="store_true",
+                   help="ask the model again for icons already judged in an earlier "
+                        "proposals file (default: reuse those answers)")
     p.add_argument("--from-proposals", default=None, metavar="PATH",
                    help="use an earlier proposals file instead of calling the model")
     p.add_argument("--apply", action="store_true",

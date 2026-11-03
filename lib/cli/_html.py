@@ -15,6 +15,7 @@ from pathlib import Path
 
 from jinja2 import Template
 
+from lib.core.quality import GENERIC_WORDS
 from lib.util.paths import TEMPLATE_DIR
 
 # ---------------------------------------------------------------------------
@@ -62,6 +63,61 @@ function downloadFile(name, obj){
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name; a.click(); URL.revokeObjectURL(a.href);
 }
+// ---- browser-cache reconciliation ----
+// The browser cache holds a person's real work, so a regenerated page never
+// overwrites it. Per record: the cache wins unless the freshly generated data
+// carries a newer human `edited_at`; those are reported as conflicts (cache
+// kept) so the person can choose to take them. A cached record with no stamp
+// (older export) keeps its values except fields that are blank or placeholder
+// junk while the fresh data has something real.
+function isJunk(field, v){
+  if (Array.isArray(v)) return v.length === 0;
+  const s = String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!s) return true;
+  if (field !== 'name') return false;
+  if (/^(unnamed|unknown|sprite|icon|image|img)?_?[0-9]+$/.test(s)) return true;
+  const words = s.split('_').map(w => w.replace(/[0-9]+$/, '')).filter(Boolean);
+  return words.every(w => GENERIC_WORDS.includes(w));
+}
+function mergeCache(fresh, cached, fields){
+  const merged = {}, conflicts = {};
+  for (const id of new Set([...Object.keys(fresh), ...Object.keys(cached)])) {
+    const f = fresh[id], c = cached[id];
+    if (c === undefined) { merged[id] = f; continue; }
+    if (f === undefined || typeof c !== 'object' || typeof f !== 'object' || !c || !f) { merged[id] = c; continue; }
+    // A cached card nobody touched holds no work; the fresh data replaces it.
+    if (!(c.edited_at || c.edited || c.decision)) { merged[id] = f; continue; }
+    const cts = c.edited_at || '', fts = f.edited_at || '';
+    if (fts && fts > cts) { merged[id] = c; conflicts[id] = f; continue; }
+    if (cts) { merged[id] = c; continue; }
+    const m = { ...f, ...c };
+    for (const k of fields) if (isJunk(k, c[k]) && !isJunk(k, f[k])) m[k] = f[k];
+    merged[id] = m;
+  }
+  return { merged, conflicts };
+}
+// Offer to replace cached records with the newer generated ones. The cache is
+// copied to `<key>:backup` first, so taking them is undoable by hand.
+function offerConflicts(conflicts, store, key, save, rerender){
+  const ids = Object.keys(conflicts);
+  if (!ids.length) return;
+  const bar = document.createElement('div');
+  bar.style.cssText = 'background:#3a2f12;color:#f5d58a;padding:8px 14px;font-size:13px;display:flex;gap:12px;align-items:center';
+  const msg = document.createElement('span');
+  msg.textContent = ids.length + ' card(s) have a newer stored edit than your browser cache. Your cached values are kept.';
+  const take = document.createElement('button');
+  take.textContent = 'Take stored edits';
+  take.onclick = () => {
+    try { localStorage.setItem(key + ':backup', localStorage.getItem(key) || ''); } catch(e){}
+    for (const id of ids) store[id] = conflicts[id];
+    save(); bar.remove(); rerender();
+  };
+  const keep = document.createElement('button');
+  keep.textContent = 'Keep mine';
+  keep.onclick = () => bar.remove();
+  bar.append(msg, take, keep);
+  document.body.prepend(bar);
+}
 function fuzzyScore(term, opt){
   const t = term.toLowerCase(), o = opt.toLowerCase();
   let ti = 0, score = 0, consec = 0, marks = [];
@@ -100,7 +156,10 @@ def render_template(name, **context):
     """
     template = Template((TEMPLATE_DIR / name).read_text(encoding="utf-8"))
     context.setdefault("shared_css", BASE_CSS)
-    context.setdefault("shared_js", BASE_JS)
+    context.setdefault(
+        "shared_js",
+        BASE_JS + f"const GENERIC_WORDS = {json.dumps(sorted(GENERIC_WORDS))};\n",
+    )
     return template.render(**context)
 
 

@@ -33,7 +33,7 @@ _PLACEHOLDER_RE = re.compile(
 # Pack-filename words that carry no meaning on their own. A name made only of
 # these plus counters (``ability_icons1_12``, ``resized_passive2``,
 # ``skill_icon_03``) is a filename, not a label.
-_GENERIC_WORDS = {
+GENERIC_WORDS = {
     "icon", "icons", "ability", "abilities", "skill", "skills", "spell",
     "spells", "sprite", "sprites", "image", "img", "pic", "tile", "asset",
     "passive", "active", "resized", "new", "copy", "final", "unnamed", "untitled",
@@ -91,7 +91,7 @@ def is_placeholder_name(name):
         return True
     words = [re.sub(r"\d+$", "", w) for w in slug.split("_")]
     words = [w for w in words if w]
-    return all(w in _GENERIC_WORDS for w in words)
+    return all(w in GENERIC_WORDS for w in words)
 
 
 def clean_tags(tags):

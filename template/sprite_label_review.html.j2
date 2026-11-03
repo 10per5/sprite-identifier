@@ -37,12 +37,16 @@ const initial = {{ labels|safe }};
 const categories = {{ categories|safe }};
 const key = 'sprite-labels-v1:' + location.pathname;
 let labels = { ...initial };
-try { labels = { ...labels, ...loadJSON(key) || {} } } catch (e) {}
+let _conflicts = {};
+try {
+  const _merge = mergeCache(initial, loadJSON(key) || {}, ['name', 'category', 'tags']);
+  labels = _merge.merged; _conflicts = _merge.conflicts;
+} catch (e) {}
 const grid = document.querySelector('#grid');
 const summary = document.querySelector('#summary');
 const search = document.querySelector('#search');
 function save() { saveJSON(key, labels); render() }
-function edit(sid, patch) { labels[sid] = { ...labels[sid], ...patch, edited: true } }
+function edit(sid, patch) { labels[sid] = { ...labels[sid], ...patch, edited: true, edited_at: new Date().toISOString() } }
 function savelabels() { saveJSON(key, labels) }
 function asset(p) { return assetPath('{{ asset_prefix }}', p) }
 function focusInputAt(index) {
@@ -188,7 +192,7 @@ function setupAutocomplete(input, options) {
 }
 function setLabel(id, candidate) {
   const old = labels[id] || {};
-  labels[id] = { ...old, reference: candidate.path, name: candidate.name, category: candidate.category, edited: true };
+  labels[id] = { ...old, reference: candidate.path, name: candidate.name, category: candidate.category, edited: true, edited_at: new Date().toISOString() };
   save();
 }
 function render() {
@@ -320,4 +324,5 @@ document.querySelector('#import').addEventListener('change', async event => {
   event.target.value = '';
 });
 render();
+offerConflicts(_conflicts, labels, key, savelabels, render);
 </script></body></html>

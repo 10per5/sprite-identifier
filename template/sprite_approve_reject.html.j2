@@ -57,8 +57,23 @@ const CATEGORIES = {{ categories }};
 const key = 'sprite-review-approval:'+location.pathname;
 let stored = {};
 try{stored = loadJSON(key) || {}}catch(e){}
-// Decisions exported to JSON first, then unsaved localStorage edits on top.
-let decisions = Object.assign({}, SAVED_DECISIONS, stored);
+// Exported decisions are the fresh data; the browser cache holds unsaved work
+// and wins unless the export carries a newer stored edit (see mergeCache).
+const _merge = mergeCache(SAVED_DECISIONS, stored, ['name','category','subcategory','tags']);
+let decisions = _merge.merged;
+// The sprite's own fields come from the current metadata. An unstamped cached
+// card whose name/tags are blank or placeholder junk (saved while the metadata
+// was still junk) takes the metadata value; anything non-junk, and anything
+// stamped as a human edit, is left alone.
+let _healed = 0;
+for (const s of SPRITES) {
+  const d = decisions[s.id];
+  if (!d || typeof d !== 'object' || d.edited_at) continue;
+  for (const k of ['name','category','subcategory','tags']) {
+    if (isJunk(k, d[k]) && !isJunk(k, s[k])) { d[k] = s[k]; _healed++; }
+  }
+}
+if (_healed) { try { saveJSON(key, decisions) } catch (e) {} }
 const CURRENT_IDS = new Set(SPRITES.map(s=>s.id));
 const STALE_IDS = Object.keys(decisions).filter(id=>!CURRENT_IDS.has(id)).sort();
 let idx = 0;
@@ -115,9 +130,19 @@ taglist.innerHTML='';
 (tagsFor(s)).forEach(t=>{const el=document.createElement('span');el.className='tag';el.textContent=t;taglist.appendChild(el)});
 }
 function tagsFor(s){const t=[];if(s.category)t.push(s.category.split('/').pop());if(s.tags&&Array.isArray(s.tags))t.push(...s.tags);return t;}
+// edited_at only moves when the visible fields differ from what the card
+// started with (the saved record, else the page's prefill), so merely
+// browsing past a card never stamps stale prefilled values as a new edit.
+function stampFor(s,obj){
+const prev=decisions[s.id];
+const base=(prev&&typeof prev==='object')?prev:{name:s.name,category:s.category,subcategory:s.subcategory,tags:s.tags||[]};
+const same=['name','category','subcategory'].every(k=>(base[k]||'')===(obj[k]||''))&&(base.tags||[]).join(',')===obj.tags.join(',');
+if(same)return (prev&&prev.edited_at)||undefined;
+return new Date().toISOString();
+}
 function decisionObj(v){
 const s=SPRITES[idx];
-return {
+const o={
 decision: v,
 name: f.name.value,
 category: f.category.value,
@@ -126,6 +151,8 @@ tags: f.tags.value.split(',').map(x=>x.trim()).filter(Boolean),
 pixel_hash: s.pixel_hash||'',
 source: 'manual'
 };
+const ts=stampFor(s,o);if(ts)o.edited_at=ts;
+return o;
 }
 function applyDecision(v){
 if(idx<0||idx>=SPRITES.length)return;
@@ -146,7 +173,9 @@ let decision=null;
 if(existing&&existing.decision)decision=existing.decision;
 else if(existing==='y')decision='y';
 else if(existing==='n')decision='n';
-decisions[s.id]={decision,name:f.name.value,category:f.category.value,subcategory:f.subcategory.value,tags:f.tags.value.split(',').map(x=>x.trim()).filter(Boolean),pixel_hash:s.pixel_hash||'',source:'manual'};
+const o={decision,name:f.name.value,category:f.category.value,subcategory:f.subcategory.value,tags:f.tags.value.split(',').map(x=>x.trim()).filter(Boolean),pixel_hash:s.pixel_hash||'',source:'manual'};
+const ts=stampFor(s,o);if(ts)o.edited_at=ts;
+decisions[s.id]=o;
 saveLocal();
 }
 function syncModified(){
@@ -175,4 +204,5 @@ if(e.key==='ArrowLeft'){e.preventDefault();idx--;if(idx<0)idx=0;render();return;
 });
 showStaleWarning();
 render();
+offerConflicts(_merge.conflicts, decisions, key, saveLocal, render);
 </script></body></html>

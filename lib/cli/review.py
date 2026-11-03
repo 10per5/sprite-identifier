@@ -14,6 +14,7 @@
 import argparse
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from lib.cli._html import render_template, relative_prefix
@@ -56,6 +57,29 @@ def _sprite_id(path, root, recursive):
         return path.stem
 
 
+def _now_iso():
+    """UTC timestamp in the same shape as the pages' ``toISOString()``."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _content_allowed(entry, record, replace=False):
+    """May ``record``'s name/category/tags overwrite ``entry``?
+
+    Pages stamp a record with ``edited_at`` only when a human changed it. The
+    newer stamp wins, so a stale page export cannot clobber a later edit made
+    elsewhere (labels pass, another export). A record with no stamp is a
+    legacy or untouched export: it only applies to entries no stamped human
+    edit has touched. ``replace`` lets the record win regardless.
+    """
+    if replace:
+        return True
+    entry_ts = entry.get("edited_at")
+    if not entry_ts:
+        return True
+    ts = record.get("edited_at")
+    return bool(ts) and ts > entry_ts
+
+
 def _decision_value(record):
     return record.get("decision") if isinstance(record, dict) else record
 
@@ -96,7 +120,7 @@ def _merge_label_hashes(lookup, labels_path):
     return lookup
 
 
-def merge_decisions(meta_path, decisions, id_lookup, domain=None):
+def merge_decisions(meta_path, decisions, id_lookup, domain=None, replace=False):
     """Write manual name/category/subcategory/tags edits into metadata.
 
     Decisions are hash-matched when they carry a ``pixel_hash`` (new exports),
@@ -108,11 +132,16 @@ def merge_decisions(meta_path, decisions, id_lookup, domain=None):
     ``False`` for ``n``); `build` only waives its soft checks for approved
     entries. Categories are canonicalised against ``domain`` when given.
 
-    Returns ``(applied, unmatched)`` where ``unmatched`` is a list of sprite ids
-    that could not be resolved to an on-disk image or metadata hash.
+    A record's content only applies if it is newer than the entry's last human
+    edit (see :func:`_content_allowed`); the approve/reject decision always
+    applies. Returns ``(applied, unmatched, kept)`` where ``unmatched`` lists
+    sprite ids that could not be resolved to an on-disk image or metadata hash
+    and ``kept`` lists ids whose content was older than the stored edit and so
+    was left alone (pass ``replace=True`` to override).
     """
     applied = 0
     unmatched = []
+    kept = []
     with metadata_lock(meta_path):
         meta = load_metadata(meta_path)
         for sid, record in decisions.items():
@@ -124,17 +153,25 @@ def merge_decisions(meta_path, decisions, id_lookup, domain=None):
                 continue
 
             entry = meta["entries"].setdefault(phash, {})
-            if record.get("name"):
-                entry["name"] = record["name"]
-            if record.get("category"):
-                category = record["category"]
-                if domain is not None:
-                    category = canonical_category(category, domain) or category
-                entry["category"] = category
-            if "subcategory" in record:
-                entry["subcategory"] = record.get("subcategory") or ""
-            if isinstance(record.get("tags"), list):
-                entry["tags"] = record["tags"]
+            # The approval page pre-fills from the metadata it was generated
+            # against; a placeholder name or empty tags there are stale
+            # defaults, never an answer, so they must not clobber real values.
+            if not _content_allowed(entry, record, replace):
+                kept.append(sid)
+            else:
+                if record.get("name") and not is_placeholder_name(record["name"]):
+                    entry["name"] = record["name"]
+                if record.get("category"):
+                    category = record["category"]
+                    if domain is not None:
+                        category = canonical_category(category, domain) or category
+                    entry["category"] = category
+                if "subcategory" in record:
+                    entry["subcategory"] = record.get("subcategory") or ""
+                if isinstance(record.get("tags"), list) and record["tags"]:
+                    entry["tags"] = record["tags"]
+                if record.get("edited_at"):
+                    entry["edited_at"] = record["edited_at"]
             entry["pixel_hash"] = phash
             entry["manual"] = True
             decision = _decision_value(record)
@@ -144,7 +181,7 @@ def merge_decisions(meta_path, decisions, id_lookup, domain=None):
                 entry["approved"] = False
             applied += 1
         atomic_save(meta, meta_path, lock=False)  # outer metadata_lock held
-    return applied, unmatched
+    return applied, unmatched, kept
 
 
 def _render_review_page(sprite_data, initial_labels, categories, output_path,
@@ -200,6 +237,8 @@ def cmd_review_label(args):
             "reference": entry.get("path") if domain.reference_sources else None,
             "pixel_hash": ph,
             "source": entry.get("source", ""),
+            # Lets the page tell a stored human edit from its own cached one.
+            **({"edited_at": entry["edited_at"]} if entry.get("edited_at") else {}),
         }
 
     # Build catalogue candidate entries from the domain's reference sources.
@@ -265,16 +304,18 @@ def _ai_hint(entry):
     return " · ".join(parts)
 
 
-def apply_labels(meta_path, labels, domain, id_lookup):
+def apply_labels(meta_path, labels, domain, id_lookup, replace=False):
     """Merge edited labeling-page cards into metadata as manual labels.
 
     Only records with ``edited: true`` count. Names are sanitised, categories
     canonicalised and tags cleaned; a card marked deleted is recorded as
-    rejected so it never reaches the catalogue. Returns ``(applied, rejected,
-    unmatched)``.
+    rejected so it never reaches the catalogue. Cards older than the entry's
+    last human edit are left alone unless ``replace``. Returns ``(applied,
+    rejected, unmatched, kept)``.
     """
     applied = rejected = 0
     unmatched = []
+    kept = []
     with metadata_lock(meta_path):
         meta = load_metadata(meta_path)
         for sid, record in labels.items():
@@ -285,6 +326,9 @@ def apply_labels(meta_path, labels, domain, id_lookup):
                 unmatched.append(sid)
                 continue
             entry = meta["entries"].setdefault(phash, {"pixel_hash": phash})
+            if not _content_allowed(entry, record, replace):
+                kept.append(sid)
+                continue
             if record.get("deleted"):
                 entry["approved"] = False
                 rejected += 1
@@ -301,13 +345,14 @@ def apply_labels(meta_path, labels, domain, id_lookup):
                 entry["tags"] = clean_tags(tags)
             entry["pixel_hash"] = phash
             entry["manual"] = True
+            entry["edited_at"] = record.get("edited_at") or _now_iso()
             # A human answer supersedes the incomplete-LLM flag.
             entry.pop("needs_review", None)
             if entry.get("llm_status") == "incomplete":
                 entry["llm_status"] = "manual"
             applied += 1
         atomic_save(meta, meta_path, lock=False)  # outer metadata_lock held
-    return applied, rejected, unmatched
+    return applied, rejected, unmatched, kept
 
 
 def cmd_apply_labels(args):
@@ -328,12 +373,16 @@ def cmd_apply_labels(args):
         for path in iter_images(sprites_dir, recursive=recursive,
                                 extensions=domain.extensions):
             lookup[_sprite_id(path, sprites_dir, recursive)] = pixel_hash(path)
-    applied, rejected, unmatched = apply_labels(meta_path, labels, domain, lookup)
+    applied, rejected, unmatched, kept = apply_labels(
+        meta_path, labels, domain, lookup, replace=getattr(args, "replace", False))
     print(f"Applied {applied} manual label(s) into {meta_path}"
           + (f", marked {rejected} deleted card(s) as rejected" if rejected else ""))
     if unmatched:
         print(f"  {len(unmatched)} card(s) had no matching image/hash "
               f"(first: {', '.join(sorted(unmatched)[:5])})")
+    if kept:
+        print(f"  Kept {len(kept)} newer stored edit(s) over older card(s) "
+              f"(first: {', '.join(sorted(kept)[:5])}); --replace to take the cards.")
     skipped = sum(1 for r in labels.values() if isinstance(r, dict) and not r.get("edited"))
     if skipped:
         print(f"  Ignored {skipped} untouched card(s) (pre-filled values are not labels).")
@@ -384,6 +433,24 @@ def cmd_review_approval(args):
             ).get("decisions", {})
         except (json.JSONDecodeError, OSError) as exc:
             print(f"Warning: could not read {decisions_path}: {exc}")
+
+    # Saved decisions survive regeneration, but a stored human edit newer than
+    # the decision's own stamp wins: refresh those cards from the metadata
+    # (keeping their approve/reject) instead of showing the stale values.
+    refreshed = 0
+    for sprite in sprite_data:
+        record = initial_decisions.get(sprite["id"])
+        entry_ts = entry_for(meta, sprite["pixel_hash"], {}).get("edited_at")
+        if not isinstance(record, dict) or not entry_ts:
+            continue
+        if (record.get("edited_at") or "") >= entry_ts:
+            continue
+        for key in ("name", "category", "subcategory", "tags"):
+            record[key] = sprite[key]
+        record["edited_at"] = entry_ts
+        refreshed += 1
+    if refreshed:
+        print(f"Refreshed {refreshed} saved decision(s) from newer stored edits.")
 
     current_ids = {sprite["id"] for sprite in sprite_data}
     stale_ids = sorted(set(initial_decisions) - current_ids)
@@ -442,11 +509,16 @@ def cmd_move_approved(args):
             lookup_dirs.append(project_path(src))
         lookup = _id_to_hash(lookup_dirs, recursive, domain.extensions)
         lookup = _merge_label_hashes(lookup, domain.labels_json)
-        applied, unmatched = merge_decisions(meta_path, decisions, lookup, domain)
+        applied, unmatched, kept = merge_decisions(
+            meta_path, decisions, lookup, domain,
+            replace=getattr(args, "replace", False))
         print(f"Merged {applied} decision(s) into {meta_path}")
         if unmatched:
             print(f"  {len(unmatched)} decision(s) had no matching image/hash "
                   f"(first: {', '.join(sorted(unmatched)[:5])})")
+        if kept:
+            print(f"  Kept {len(kept)} newer stored edit(s) over older decision(s) "
+                  f"(first: {', '.join(sorted(kept)[:5])}); --replace to take the decisions.")
 
     if getattr(args, "merge_only", False):
         return
@@ -506,6 +578,8 @@ def register(subparsers):
     p.add_argument("--recursive", action=argparse.BooleanOptionalAction,
                    default=None,
                    help="scan subfolders (default: on for spells, off for items)")
+    p.add_argument("--replace", action="store_true",
+                   help="let the cards win even over newer stored edits")
     p.set_defaults(func=cmd_apply_labels)
 
     p = subparsers.add_parser(
@@ -541,4 +615,6 @@ def register(subparsers):
     p.add_argument("--recursive", action=argparse.BooleanOptionalAction,
                    default=None,
                    help="scan subfolders (default: on for spells, off for items)")
+    p.add_argument("--replace", action="store_true",
+                   help="let the decisions win even over newer stored edits")
     p.set_defaults(func=cmd_move_approved)
