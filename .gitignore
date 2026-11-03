@@ -5,3 +5,6 @@ __pycache__
 out/**/metadata.json.lock
 out/**/metadata.json.progress
 *.tmp
+
+# Python environments
+.venv/

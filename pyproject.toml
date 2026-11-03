@@ -1,0 +1,24 @@
+[project]
+name = "sprite-workshop"
+version = "0.1.0"
+description = "Normalize, de-duplicate, AI-tag and catalogue pixel-art item sprites and spell icons."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE.md"]
+authors = [{ name = "10per5" }]
+# tomllib (catalogue viewer, revert) is stdlib from 3.11.
+requires-python = ">=3.11"
+dependencies = [
+    "jinja2>=3.1",   # review / viewer HTML pages
+    "numpy>=1.26",   # pixel hashing, normalize, split, dedup
+    "pillow>=9.1",   # image I/O (Image.Resampling)
+]
+
+[project.optional-dependencies]
+# Faster, spec-complete TOML writer; lib/util/toml.py falls back without it.
+toml = ["tomli-w>=1.0"]
+
+[tool.uv]
+# An application run from the repo (`uv run sprite.py`), not an installable
+# package: lib/ and template/ are resolved relative to the checkout.
+package = false

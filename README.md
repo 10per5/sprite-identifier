@@ -65,6 +65,21 @@ project/
 
 ---
 
+## Setup
+
+Python 3.11+ is required. Dependencies are declared in `pyproject.toml` and
+managed with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync                    # create .venv and install jinja2, numpy, pillow
+uv sync --extra toml       # optionally add tomli-w for TOML output
+uv run sprite.py           # run any command inside the managed environment
+```
+
+Without uv, `pip install jinja2 numpy pillow` into a virtualenv works too.
+
+---
+
 ## Quick start — the guided wizard
 
 You don't have to memorize any commands. Run:
