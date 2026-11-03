@@ -14,7 +14,7 @@ require forking the CLI or the LLM loop.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 # ``classify(relative_path) -> (category, subcategory)``. Category is the
@@ -58,6 +58,9 @@ class Domain:
     taxonomy: dict
     prompts: PromptSet
     classify: Classifier
+    # Short/variant spellings the LLM (or a human) uses for a category, e.g.
+    # ``{"off": "offensive"}``. Applied by ``lib.core.quality``.
+    category_aliases: dict[str, str] = field(default_factory=dict)
 
     # Scan/source behaviour --------------------------------------------------
     recursive: bool = False

@@ -14,6 +14,7 @@ import argparse
 import os
 
 from lib.core.llm_pass import run_llm_pass
+from lib.core.quality import apply_llm_result, is_placeholder_name, llm_retry_allowed
 from lib.domains import add_domain_argument, resolve_domain
 from lib.llm.orcarouter import TEXT_MODEL, VISION_MODEL
 from lib.util.paths import project_path
@@ -42,13 +43,22 @@ def _should_process(entry, force=False):
     ``force`` refreshes every named sprite on disk, which is what you want after
     a manual rename: the name stays, but category/subcategory/tags are redone.
 
+    Placeholder names (``icon43``, ``unnamed``) are never processed: the name
+    is the model's only evidence here.
+
     Renames are also auto-detected: when ``name`` no longer matches the model's
     previous ``vllm_name``, the category/tags may be stale, so the entry is
     refreshed once even though all fields are populated.
     """
-    if not entry.get("name"):
+    if is_placeholder_name(entry.get("name")):
+        # `icon43` gives a text-only model nothing to work with; these need
+        # the vision `label` pass or the manual labeling page.
         return False
     if force:
+        return True
+    if not llm_retry_allowed(entry):
+        return False
+    if entry.get("needs_review"):
         return True
     has_category = bool(entry.get("category"))
     has_subcategory = bool(entry.get("subcategory"))
@@ -59,18 +69,13 @@ def _should_process(entry, force=False):
     return bool(vllm_name) and vllm_name != entry.get("name")
 
 
-def _apply_result(entry, result):
-    """Refine the entry's category/subcategory/tags. Does NOT overwrite `name`."""
-    entry["category"] = result.get("category", entry.get("category", "other"))
-    entry["subcategory"] = result.get("subcategory", "")
-    entry["tags"] = result.get("tags", [])
-    # Mark this name as inferred so a renamed entry is refreshed once, not on
-    # every subsequent run.
-    entry["vllm_name"] = entry.get("name")
-    entry["vllm_category"] = result.get("category", entry.get("vllm_category"))
-    entry["vllm_tags"] = result.get("tags", [])
-    entry["vllm_confidence"] = result.get("confidence")
-    entry["vllm_notes"] = result.get("notes", "")
+def _apply_result(entry, result, domain):
+    """Refine the entry's category/subcategory/tags. Does NOT overwrite `name`.
+
+    ``vllm_name`` is set to the current name so a renamed entry is refreshed
+    once, not on every run. Incomplete responses leave the entry pending.
+    """
+    return apply_llm_result(entry, result, domain, take_name=False)
 
 
 def cmd_infer(args):
@@ -112,7 +117,7 @@ def cmd_infer(args):
         use_image=use_image,
         cost_per_sprite=cost_per,
         should_process=lambda entry: _should_process(entry, force=force),
-        apply_result=_apply_result,
+        apply_result=lambda entry, result: _apply_result(entry, result, domain),
         timeout=args.timeout,
         deadline=args.deadline,
         fallback_models=fallback_models,

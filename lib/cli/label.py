@@ -18,6 +18,7 @@ import os
 from lib.core.pixel_hash import pixel_hash
 from lib.core.sprite_metadata import load as load_metadata, entry_for
 from lib.core.llm_pass import run_llm_pass
+from lib.core.quality import apply_llm_result, llm_retry_allowed
 from lib.domains import add_domain_argument, resolve_domain
 from lib.llm.orcarouter import VISION_MODEL
 from lib.util.paths import project_path, iter_images
@@ -32,22 +33,20 @@ COST_PER_SPRITE = (EST_INPUT_TOKENS / 1_000_000) * INPUT_COST_PER_1M + \
 
 
 def _should_process(entry):
-    """A sprite still needs labeling if it has no VLLM tags yet."""
-    return not entry.get("vllm_tags")
+    """A sprite still needs labeling if it has no VLLM tags yet.
+
+    Entries whose responses kept coming back incomplete stop being retried after
+    ``MAX_LLM_ATTEMPTS`` and wait for the approve/reject page instead.
+    Icons a human already tagged on the labeling page are not re-sent.
+    """
+    if entry.get("manual") and entry.get("tags"):
+        return False
+    return not entry.get("vllm_tags") and llm_retry_allowed(entry)
 
 
-def _apply_result(entry, result):
-    """Merge a successful VLLM response into the entry."""
-    entry["name"] = result["name"]
-    entry["category"] = result["category"]
-    entry["subcategory"] = result.get("subcategory", "")
-    entry["tags"] = result.get("tags", [])
-    entry["vllm_name"] = result["name"]
-    entry["vllm_category"] = result["category"]
-    entry["vllm_tags"] = result.get("tags", [])
-    entry["vllm_confidence"] = result.get("confidence")
-    entry["vllm_notes"] = result.get("notes", "")
-    entry["manual"] = entry.get("manual", False)
+def _apply_result(entry, result, domain):
+    """Merge a VLLM response; incomplete ones leave the entry pending."""
+    return apply_llm_result(entry, result, domain, take_name=True)
 
 
 def cmd_label(args):
@@ -85,7 +84,7 @@ def cmd_label(args):
         use_image=True,
         cost_per_sprite=COST_PER_SPRITE,
         should_process=_should_process,
-        apply_result=_apply_result,
+        apply_result=lambda entry, result: _apply_result(entry, result, domain),
         debug=args.debug,
         prompts=domain.prompts,
         recursive=recursive,

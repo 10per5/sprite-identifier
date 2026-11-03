@@ -6,6 +6,7 @@ detects the current project state, shows what still needs doing, and walks you
 through each step with safe defaults — you only type when you want to change a
 path or skip a step.
 """
+import json
 import os
 import re
 import sys
@@ -23,7 +24,8 @@ from lib.cli import (
     review as _review_mod,
     view as _view_mod,
 )
-from lib.core.sprite_metadata import load as load_metadata
+from lib.core.quality import entry_issues
+from lib.core.sprite_metadata import load as load_metadata, variant_to_base
 from lib.core.pixel_hash import pixel_hash
 from lib.domains import get_domain
 from lib.domains.base import Domain
@@ -70,6 +72,7 @@ def _snapshot(domain: Domain):
         label_entries = named_nonref
         infer_entries = named_nonref
         infer_dir_path = primary_dir
+        label_hashes = {pixel_hash(p) for p in images}
     else:
         # Spells: the two packs are handled independently. Match disk images to
         # metadata by pixel hash so entries created by `infer` (which may lack
@@ -85,7 +88,8 @@ def _snapshot(domain: Domain):
                                    extensions=domain.extensions)
         infer_images = iter_images(infer_dir_path, recursive=domain.recursive,
                                    extensions=domain.extensions)
-        label_entries = [entries.get(pixel_hash(p), {}) for p in label_images]
+        label_hashes = {pixel_hash(p) for p in label_images}
+        label_entries = [entries.get(h, {}) for h in label_hashes]
         infer_entries = [entries.get(pixel_hash(p), {}) for p in infer_images]
 
     unnamed = [e for e in named_nonref if not e.get("name")]
@@ -120,15 +124,65 @@ def _snapshot(domain: Domain):
         index_dirs = [primary_dir]
 
     # Items build from the approved folder (move-approved empties the source
-    # folder). Spells build from their named + unnamed packs, plus approved
-    # images if the optional CLI approval flow was used.
+    # folder). Spells build from the approved folder plus the curated named
+    # pack; raw packs in the source folder must be approved first.
     if domain.key == "items":
         build_dirs = [project_path(domain.approved_dir)]
     else:
         build_dirs = [d for d in build_sources if d.is_dir()]
         approved = project_path(domain.approved_dir)
-        if approved.is_dir():
+        if approved.is_dir() and approved not in build_dirs:
             build_dirs.append(approved)
+
+    # Approve/reject decisions, keyed by pixel hash (ids collide across packs).
+    decisions_path = project_path(domain.approval_json)
+    decided = {}
+    if decisions_path.exists():
+        try:
+            records = json.loads(decisions_path.read_text(encoding="utf-8")).get("decisions", {})
+        except (json.JSONDecodeError, OSError):
+            records = {}
+        for record in records.values():
+            if isinstance(record, dict) and record.get("pixel_hash"):
+                decided[record["pixel_hash"]] = record.get("decision")
+    awaiting_review = sum(1 for h in label_hashes if h not in decided)
+
+    # Manual labeling queue: on-disk icons the build would still block, and
+    # cards edited on the labeling page that are not in metadata yet.
+    manual_pending = sum(
+        1 for e in label_entries
+        if [i for i in entry_issues(e, domain) if i != "rejected"]
+    )
+    unapplied_labels = 0
+    labels_path = project_path(domain.labels_json)
+    if labels_path.exists():
+        try:
+            cards = json.loads(labels_path.read_text(encoding="utf-8")).get("labels", {})
+        except (json.JSONDecodeError, OSError):
+            cards = {}
+        for card in cards.values():
+            if not isinstance(card, dict) or not card.get("edited"):
+                continue
+            entry = entries.get(card.get("pixel_hash")) or {}
+            done = (entry.get("approved") is False) if card.get("deleted") else entry.get("manual")
+            if not done:
+                unapplied_labels += 1
+    approved_to_move = sum(1 for h in label_hashes if decided.get(h) == "y")
+
+    # What `build` would do right now: ready vs. blocked by the quality gate.
+    v2b = variant_to_base(meta) if meta else {}
+    build_ready = build_blocked = 0
+    for directory in build_dirs:
+        for path in iter_images(directory, recursive=domain.recursive,
+                                extensions=domain.extensions):
+            phash = pixel_hash(path)
+            entry = entries.get(phash)
+            if not isinstance(entry, dict):
+                continue
+            if entry_issues(entry, domain, variant=phash in v2b):
+                build_blocked += 1
+            else:
+                build_ready += 1
 
     return _NS(
         domain=domain,
@@ -151,6 +205,12 @@ def _snapshot(domain: Domain):
         infer_dir=str(infer_dir_path),
         named_nonref=named_nonref,
         meta_path=meta_path,
+        awaiting_review=awaiting_review,
+        manual_pending=manual_pending,
+        unapplied_labels=unapplied_labels,
+        approved_to_move=approved_to_move,
+        build_ready=build_ready,
+        build_blocked=build_blocked,
     )
 
 
@@ -200,6 +260,18 @@ def _step_review_label(ctx, opts):
         metadata=opts.get("metadata", ctx.domain.metadata),
         output=opts.get("output", ctx.domain.label_review_html),
         top=6,
+        # Without reference art there is nothing to match against, so the
+        # page is a manual queue for what the AI passes left blocked.
+        pending_only=not ctx.domain.reference_sources,
+    ))
+
+
+def _step_apply_labels(ctx, opts):
+    _review_mod.cmd_apply_labels(_ns(
+        domain=ctx.domain.key,
+        labels=opts.get("labels", ctx.domain.labels_json),
+        metadata=opts.get("metadata", ctx.domain.metadata),
+        sprites=opts.get("sprites", ctx.label_dir),
     ))
 
 
@@ -289,6 +361,9 @@ STEP_DEFS = {
     "review-label": _NS(key="review-label", title="Manual labeling page",
         desc="Generate an offline grid page to label sprites by hand (optional).",
         needs_key=False, optional=True, run=_step_review_label),
+    "apply-labels": _NS(key="apply-labels", title="Apply manual labels",
+        desc="Write the cards you edited on the labeling page into metadata.",
+        needs_key=False, optional=False, run=_step_apply_labels),
     "auto-name": _NS(key="auto-name", title="Auto-name from catalogue",
         desc="Fill names/categories for sprites via pixel_hash matching + exported labels.",
         needs_key=False, optional=False, run=_step_auto_name),
@@ -299,13 +374,13 @@ STEP_DEFS = {
         desc="Fill category/subcategory/tags for named sprites from the name + taxonomy.",
         needs_key=True, optional=False, run=_step_infer),
     "review-approval": _NS(key="review-approval", title="Approve/reject page",
-        desc="Single-sprite Y/N review page for the post-AI pass (optional).",
-        needs_key=False, optional=True, run=_step_review_approval),
+        desc="Single-sprite Y/N review page for the post-AI pass (fix names/categories here).",
+        needs_key=False, optional=False, run=_step_review_approval),
     "move-approved": _NS(key="move-approved", title="Move approved out",
-        desc="Move approved sprites out of the source folder so only leftovers remain.",
+        desc="Commit review edits and move approved sprites into the approved folder.",
         needs_key=False, optional=False, run=_step_move_approved),
     "build": _NS(key="build", title="Build catalogued library",
-        desc="Assemble <category>/<name>.png + .toml and catalog.toml.",
+        desc="Assemble <category>/<name>.png + .toml and catalog.toml (quality-gated).",
         needs_key=False, optional=False, run=_step_build),
     "viewer": _NS(key="viewer", title="Browse catalogue",
         desc="Generate an offline HTML viewer for the built catalogue.",
@@ -337,7 +412,17 @@ def _status_for(step, ctx):
                 else ("todo", "not indexed"))
     if step.key == "review-label":
         out = project_path(ctx.domain.label_review_html)
+        if not ctx.domain.reference_sources:
+            if ctx.manual_pending:
+                return "todo", f"{ctx.manual_pending} still blocked — name/tag by hand"
+            return "done", "nothing left to label"
         return ("done", "page generated") if out.exists() else ("optional", "optional")
+    if step.key == "apply-labels":
+        if ctx.unapplied_labels:
+            return "todo", f"{ctx.unapplied_labels} edited card(s) not applied"
+        if not project_path(ctx.domain.labels_json).exists():
+            return "skip", f"export {Path(ctx.domain.labels_json).name} from the page first"
+        return "done", "labels applied"
     if step.key == "auto-name":
         if ctx.unnamed:
             return "todo", f"{len(ctx.unnamed)} unnamed"
@@ -366,12 +451,22 @@ def _status_for(step, ctx):
             return "done", "fields complete"
         return "todo", f"{complete}/{len(ctx.infer_entries)} complete"
     if step.key == "review-approval":
-        out = project_path(ctx.domain.approval_html)
-        return ("done", "page generated") if out.exists() else ("optional", "optional")
+        if not ctx.label_entries:
+            return "skip", "nothing to review"
+        if ctx.awaiting_review:
+            return "todo", f"{ctx.awaiting_review} awaiting a decision"
+        return "done", "all decided"
     if step.key == "move-approved":
-        return "todo", "ready when approved"
+        if ctx.approved_to_move:
+            return "todo", f"{ctx.approved_to_move} approved, not moved yet"
+        return "skip", "nothing approved to move"
     if step.key == "build":
-        return ("done", "library built") if ctx.built else ("todo", "not built")
+        blocked = f", {ctx.build_blocked} blocked" if ctx.build_blocked else ""
+        if ctx.build_ready:
+            return "todo", f"{ctx.build_ready} ready{blocked}"
+        if ctx.built:
+            return "done", f"library built{blocked}"
+        return "skip", f"nothing ready yet{blocked}"
     if step.key == "viewer":
         if not ctx.built:
             return "skip", "build the catalogue first"

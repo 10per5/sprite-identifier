@@ -14,8 +14,9 @@ Both passes do the same mechanical dance:
 two callbacks that actually differ between the passes:
 
   * ``should_process(entry) -> bool``   — is this entry still missing work?
-  * ``apply_result(entry, result) -> None`` — merge a successful model
-    response into the entry in place.
+  * ``apply_result(entry, result) -> bool | None`` — merge a model response
+    into the entry in place; ``False`` means it was incomplete and the entry
+    stays pending.
 
 That removes the duplicated ~120-line loop that used to live in both commands.
 """
@@ -68,7 +69,8 @@ def run_llm_pass(
         cost_per_sprite: estimated $/sprite for the cost readout, or ``None``
             to skip cost reporting (e.g. an unknown ``--model`` override).
         should_process: ``fn(entry) -> bool``; ``True`` means still pending.
-        apply_result: ``fn(entry, result) -> None``; mutates the entry in place.
+        apply_result: ``fn(entry, result) -> bool | None``; mutates the entry in
+            place. Returning ``False`` marks the response as incomplete.
         timeout: per-request socket timeout (seconds) for each model call.
         deadline: total per-sprite wall-clock budget (seconds) across all models
             + retries. When exceeded the sprite is skipped (error) instead of
@@ -189,7 +191,7 @@ def run_llm_pass(
                 print(f"  [{done}/{total}] {sprite_id} ({phash}) → ERROR: {result.get('notes')}")
                 continue
 
-            apply_result(entry, result)
+            complete = apply_result(entry, result) is not False
             entry["pixel_hash"] = phash
             set_entry(meta, phash, entry)
             # Persist this sprite immediately to the progress file.
@@ -199,11 +201,16 @@ def run_llm_pass(
             done += 1
             if cost_per_sprite is not None:
                 cost_spent += cost_per_sprite
-            head = result.get("name") or result.get("category") or ""
-            tags_preview = ", ".join((result.get("tags") or [])[:4])
             model_used = result.get("model_used")
             used_tag = f" [{model_used}]" if model_used and model_used != model else ""
-            print(f"  [{done}/{total}] {sprite_id} ({phash}) → {head} | {tags_preview}{used_tag}")
+            if complete:
+                head = entry.get("name") or entry.get("category") or ""
+                tags_preview = ", ".join((entry.get("tags") or [])[:4])
+                print(f"  [{done}/{total}] {sprite_id} ({phash}) → {head} | {tags_preview}{used_tag}")
+            else:
+                missing = ", ".join((entry.get("vllm_last") or {}).get("missing", []))
+                print(f"  [{done}/{total}] {sprite_id} ({phash}) → INCOMPLETE "
+                      f"(missing {missing or '?'}; left for retry/review){used_tag}")
 
             if done % milestone == 0 or done == total:
                 if cost_per_sprite is not None:

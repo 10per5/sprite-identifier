@@ -20,6 +20,9 @@
 .candidate button{font-size:10px;padding:4px 2px;width:100%;white-space:nowrap}
 .path{color:#aeb4c0;overflow-wrap:anywhere;margin-top:3px}
 .empty{color:#9aa1ad}
+.hint{color:#aeb4c0;font-size:12px;margin-top:4px;overflow-wrap:anywhere}
+.issues{color:#f0c36d;font-size:12px;margin-top:2px}
+.card.edited{border-color:#3d7a4e}
 .autocomplete{position:relative;display:inline-block;width:100%}
 .autocomplete-items{position:absolute;z-index:10;width:100%;border:1px solid #505661;border-top:none;border-radius:0 0 5px 5px;background:#262a33;display:none}
 .autocomplete-items div{padding:6px 8px;cursor:pointer;border-bottom:1px solid #393d45}
@@ -39,6 +42,7 @@ const grid = document.querySelector('#grid');
 const summary = document.querySelector('#summary');
 const search = document.querySelector('#search');
 function save() { saveJSON(key, labels); render() }
+function edit(sid, patch) { labels[sid] = { ...labels[sid], ...patch, edited: true } }
 function savelabels() { saveJSON(key, labels) }
 function asset(p) { return assetPath('{{ asset_prefix }}', p) }
 function focusInputAt(index) {
@@ -50,7 +54,7 @@ function focusInputAt(index) {
 }
 function deleteSprite(sid) {
   const cur = labels[sid] || {};
-  labels[sid] = { ...cur, deleted: !cur.deleted };
+  edit(sid, { deleted: !cur.deleted });
   savelabels();
   render();
   setTimeout(() => {
@@ -135,7 +139,7 @@ function setupAutocomplete(input, options) {
         ev.preventDefault();
         input.value = m.opt;
         const sid = input.dataset.id;
-        labels[sid] = { ...labels[sid], category: m.opt };
+        edit(sid, { category: m.opt });
         save();
         list.style.display = 'none';
       });
@@ -158,7 +162,7 @@ function setupAutocomplete(input, options) {
       if (m) {
         input.value = m.opt;
         const sid = input.dataset.id;
-        labels[sid] = { ...labels[sid], category: m.opt };
+        edit(sid, { category: m.opt });
         save();
       }
     }
@@ -166,7 +170,7 @@ function setupAutocomplete(input, options) {
   }
   input.addEventListener('input', () => {
     const sid = input.dataset.id;
-    labels[sid] = { ...labels[sid], category: input.value };
+    edit(sid, { category: input.value });
     savelabels();
     show(fuzzyFilter(input.value, options));
   });
@@ -184,7 +188,7 @@ function setupAutocomplete(input, options) {
 }
 function setLabel(id, candidate) {
   const old = labels[id] || {};
-  labels[id] = { ...old, reference: candidate.path, name: candidate.name, category: candidate.category };
+  labels[id] = { ...old, reference: candidate.path, name: candidate.name, category: candidate.category, edited: true };
   save();
 }
 function render() {
@@ -198,7 +202,7 @@ function render() {
   for (const sprite of shown) {
     const label = labels[sprite.id] || {};
     const card = document.createElement('section');
-    card.className = 'card' + (label.deleted ? ' deleted' : '');
+    card.className = 'card' + (label.deleted ? ' deleted' : '') + (label.edited ? ' edited' : '');
     const top = document.createElement('div');
     top.className = 'top';
     const image = document.createElement('img');
@@ -221,7 +225,7 @@ function render() {
     nameInput.dataset.id = sprite.id;
     nameInput.addEventListener('input', () => {
       const sid = nameInput.dataset.id;
-      labels[sid] = { ...labels[sid], name: nameInput.value, deleted: false };
+      edit(sid, { name: nameInput.value, deleted: false });
       savelabels();
     });
     nameInput.addEventListener('blur', savelabels);
@@ -229,7 +233,7 @@ function render() {
       if (e.key !== 'Enter' && e.key !== 'Tab') return;
       e.preventDefault();
       const sid = nameInput.dataset.id;
-      labels[sid] = { ...labels[sid], name: nameInput.value, deleted: false };
+      edit(sid, { name: nameInput.value, deleted: false });
       savelabels();
       setTimeout(() => {
         const inputs = [...document.querySelectorAll('.name')];
@@ -237,9 +241,43 @@ function render() {
         focusInputAt(i + (e.key === 'Tab' && e.shiftKey ? -1 : 1));
       }, 0);
     });
-    meta.append(id, current, nameInput);
+    const categoryInput = document.createElement('input');
+    categoryInput.type = 'text';
+    categoryInput.className = 'category';
+    categoryInput.placeholder = 'category';
+    categoryInput.value = label.category || '';
+    categoryInput.dataset.id = sprite.id;
+    const tagsInput = document.createElement('input');
+    tagsInput.type = 'text';
+    tagsInput.className = 'tags';
+    tagsInput.placeholder = 'tags, comma separated (e.g. fire, projectile, orange)';
+    tagsInput.value = (label.tags || []).join(', ');
+    tagsInput.addEventListener('input', () => {
+      edit(sprite.id, { tags: tagsInput.value.split(',').map(t => t.trim()).filter(Boolean) });
+      savelabels();
+    });
+    const fields = [nameInput, categoryInput, tagsInput].map(el => {
+      const f = document.createElement('div');
+      f.className = 'field';
+      f.append(el);
+      return f;
+    });
+    meta.append(id, current, ...fields);
+    if (sprite.hint) {
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = 'AI: ' + sprite.hint;
+      meta.append(hint);
+    }
+    if (sprite.issues && sprite.issues.length) {
+      const issues = document.createElement('div');
+      issues.className = 'issues';
+      issues.textContent = 'blocked: ' + sprite.issues.join(', ');
+      meta.append(issues);
+    }
     top.append(image, meta);
     card.append(top);
+    setupAutocomplete(categoryInput, categories);
     const candidates = document.createElement('div');
     candidates.className = 'candidates';
     for (const candidate of sprite.candidates) {
@@ -266,7 +304,7 @@ function render() {
 }
 search.addEventListener('input', render);
 document.querySelector('#next').addEventListener('click', () => {
-  const unlabeled = sprites.find(s => !labels[s.id]?.reference);
+  const unlabeled = sprites.find(s => !labels[s.id]?.edited && !labels[s.id]?.reference);
   if (unlabeled) { search.value = unlabeled.id; render(); document.querySelector('.card')?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }
 });
 document.querySelector('#export').addEventListener('click', () => {

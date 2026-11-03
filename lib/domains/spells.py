@@ -129,6 +129,21 @@ SPELL_PROMPTS = PromptSet(
 
 SPELL_CATEGORY_OPTIONS = tuple(SPELL_TAXONOMY["categories"])
 
+# Abbreviations and near-synonyms seen in model output (`off`, `def`, `mov`
+# ended up as catalogue folders before categories were canonicalised).
+SPELL_CATEGORY_ALIASES = {
+    "off": "offensive", "offense": "offensive", "attack": "offensive",
+    "damage": "offensive",
+    "def": "defensive", "defense": "defensive", "defence": "defensive",
+    "protection": "defensive",
+    "heal": "healing",
+    "mov": "movement", "mobility": "movement",
+    "summon": "summoning",
+    "ctrl": "control", "crowd_control": "control",
+    "util": "utility",
+    "div": "divination", "detection": "divination",
+}
+
 
 # ---------------------------------------------------------------------------
 # Filename/folder -> (category, subcategory) heuristics
@@ -375,7 +390,10 @@ SPELL_DOMAIN = Domain(
     index_dir="in/spellicon",
     metadata="out/spells/metadata.json",
     catalog="out/@spells",
-    build_sources=("in/spellicon",),
+    # Raw packs in in/spellicon go through review-approval + move-approved
+    # (-> out/spells/approved) like items; only the curated named pack builds
+    # directly. `build` still gates every entry.
+    build_sources=("out/spells/approved", "in/spellicon-named"),
     labels_json="out/spells/labels.json",
     label_review_html="out/spells/label_review.html",
     approval_html="out/spells/approve_reject.html",
@@ -386,10 +404,16 @@ SPELL_DOMAIN = Domain(
     taxonomy=SPELL_TAXONOMY,
     prompts=SPELL_PROMPTS,
     classify=classify,
+    category_aliases=SPELL_CATEGORY_ALIASES,
     recursive=True,
     extensions=(".png", ".jpg", ".jpeg"),
     default_source="spellicon",
     reference_sources=(),
-    wizard_steps=("index", "dedup", "label", "infer", "build", "viewer"),
+    # After the AI passes, review-label shows only the icons that are still
+    # blocked (placeholder names, no tags) for manual naming/tagging.
+    wizard_steps=(
+        "index", "dedup", "label", "infer", "review-label", "apply-labels",
+        "review-approval", "move-approved", "build", "viewer",
+    ),
     named_source_dir="in/spellicon-named",
 )

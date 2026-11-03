@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.cli import normalize, split, dedup, catalog, label, infer, index, review, view
+from lib.cli import normalize, split, dedup, catalog, label, infer, index, review, view, revert
 from lib.domains import DOMAINS, add_domain_argument
 from lib.wizard import run_wizard
 
@@ -38,7 +38,7 @@ from lib.wizard import run_wizard
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="sprite.py",
-        description="Sprite pipeline: normalize, dedup, index, label, infer, review, build.",
+        description="Sprite pipeline: normalize, dedup, index, label, infer, review, build, revert.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 asset domains:
@@ -46,7 +46,7 @@ asset domains:
   --domain spells   in/spellicon + in/spellicon-named  -> out/@spells
 
 domain-aware commands:
-  build, index, label, infer, review-label, review-approval, move-approved, guided
+  build, revert, index, label, infer, review-label, review-approval, move-approved, guided
 
 generic / item-only commands:
   normalize, split, dedup, auto-name
@@ -59,6 +59,8 @@ examples:
   python3 sprite.py label --domain spells --sprites in/spellicon
   python3 sprite.py build --domain spells
   python3 sprite.py review-approval --domain spells --sprites in/spellicon
+  python3 sprite.py move-approved --domain spells
+  python3 sprite.py revert --domain spells            # dry-run: flagged catalogue assets
 """,
     )
     parser.add_argument(
@@ -75,7 +77,7 @@ examples:
         required=False,
     )
 
-    for mod in (normalize, split, dedup, catalog, label, infer, index, review, view):
+    for mod in (normalize, split, dedup, catalog, label, infer, index, review, view, revert):
         mod.register(sub)
 
     p = sub.add_parser(

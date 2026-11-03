@@ -13,17 +13,26 @@ This replaces the old standalone `build_catalog.py` and the `apply` subcommand;
 both did the same sprite→category move and now share this single implementation.
 Names/categories/tags/recolor groups all come from the domain's metadata file,
 keyed by pixel_hash so renames never break links.
+
+Every entry passes the readiness gate in ``lib.core.quality`` first; entries
+that fail it stay in their source folder and are listed in
+``out/<domain>/build_blocked.json`` (``--allow-unsafe`` skips the gate).
+``catalog.toml`` is regenerated from all per-sprite TOMLs on disk, not just the
+ones promoted by this run.
 """
 import argparse
-import os
+import collections
+import shutil
+import tomllib
+from pathlib import Path
 
-import numpy as np
 from PIL import Image
 
 from lib.core.pixel_hash import pixel_hash
+from lib.core.quality import entry_issues
 from lib.core.sprite_metadata import load as load_metadata, variant_to_base, base_to_variants
 from lib.domains import add_domain_argument, resolve_domain
-from lib.util.paths import project_path, sanitize_name, iter_images
+from lib.util.paths import atomic_save, project_path, sanitize_name, iter_images
 from lib.util.toml import toml_dumps
 
 
@@ -44,20 +53,98 @@ def index_sprites_by_hash(sprites_dirs, extensions=(".png",), recursive=False):
     return mapping
 
 
-def _promote_image(src, dest_png):
-    """Move a PNG, or decode+save an input JPG/WebP as PNG."""
+def _promote_image(src, dest_png, copy=False):
+    """Move (or copy) a PNG, or decode+save an input JPG/WebP as PNG."""
     if src.suffix.lower() == ".png":
-        src.replace(dest_png)
+        if copy:
+            shutil.copy2(src, dest_png)
+        else:
+            src.replace(dest_png)
         return
     with Image.open(src) as image:
         image.convert("RGBA").save(dest_png, format="PNG")
-    src.unlink()
+    if not copy:
+        src.unlink()
+
+
+def _free_png_path(dest_dir, name):
+    """``<name>.png``, or ``<name>_<n>.png`` if that file already exists."""
+    dest_png = dest_dir / f"{name}.png"
+    i = 1
+    while dest_png.exists():
+        dest_png = dest_dir / f"{name}_{i}.png"
+        i += 1
+    return dest_png
+
+
+def write_catalog_index(target_root, domain):
+    """Rewrite ``catalog.toml`` from every per-sprite TOML under ``target_root``.
+
+    The index mirrors what is on disk, so assets promoted by earlier runs stay
+    listed (the old per-run index silently dropped them) and reverted assets
+    disappear. ``id`` (``<category path>/<file stem>``) is unique even when two
+    assets share a ``name``. Returns the number of indexed entries.
+    """
+    target_root = Path(target_root)
+    entries = []
+    for toml_path in sorted(target_root.rglob("*.toml")):
+        if toml_path.name == "catalog.toml":
+            continue
+        png = toml_path.with_suffix(".png")
+        if not png.exists():
+            continue
+        try:
+            with open(toml_path, "rb") as handle:
+                record = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            print(f"  Warning: skipping unreadable {toml_path}: {exc}")
+            continue
+        rel = png.relative_to(target_root).as_posix()
+        record["id"] = rel[:-len(".png")]
+        record["file"] = rel
+        entries.append(record)
+    catalog = {
+        "version": 1,
+        "domain": domain.key,
+        "count": len(entries),
+        "entries": entries,
+    }
+    (target_root / "catalog.toml").write_text(toml_dumps(catalog), encoding="utf-8")
+    return len(entries)
+
+
+def _sprite_record(entry, domain, name, category, phash, *, is_recolor,
+                   base_name=None, recolor_variants=()):
+    reference = entry.get("reference")
+    default_source = (domain.reference_sources[0]
+                      if reference and domain.reference_sources
+                      else domain.default_source)
+    confidence = entry.get("confidence")
+    if confidence is None:
+        confidence = entry.get("vllm_confidence")
+    return {
+        "name": name,
+        "category": category,
+        "subcategory": entry.get("subcategory") or "",
+        "reference": reference,
+        "source": entry.get("source") or default_source,
+        "confidence": confidence,
+        "pixel_hash": phash,
+        "is_recolor": is_recolor,
+        "base_image": base_name,
+        "recolor_of": base_name,
+        "recolor_variants": list(recolor_variants),
+        "tags": entry.get("tags") or category.split("/"),
+    }
 
 
 def build_catalog(args):
     domain = resolve_domain(args)
     meta_path = project_path(getattr(args, "metadata", None) or domain.metadata)
     target_root = project_path(getattr(args, "target", None) or domain.catalog)
+    allow_unsafe = getattr(args, "allow_unsafe", False)
+    copy = getattr(args, "copy", False)
+    min_confidence = getattr(args, "min_confidence", None)
 
     source_values = getattr(args, "sprites", None) or list(domain.build_sources)
     if isinstance(source_values, str):
@@ -75,203 +162,117 @@ def build_catalog(args):
 
     target_root.mkdir(parents=True, exist_ok=True)
 
+    def issues_for(phash, entry, variant=False):
+        if allow_unsafe:
+            return []
+        issues = entry_issues(entry, domain, min_confidence=min_confidence,
+                              variant=variant)
+        if variant:
+            base = entries.get(v2b[phash])
+            if not isinstance(base, dict) or entry_issues(
+                    base, domain, min_confidence=min_confidence):
+                issues.append("base_blocked")
+        return issues
+
     moved = skipped = 0
     recolor_count = 0
-    catalog_entries = []
+    blocked = []
+    built_names = {}
 
-    # --- Phase 1: Process base (non-recolor) images ---
+    def promote(phash, entry, *, variant):
+        nonlocal moved, skipped, recolor_count
+        src = sources_by_hash.get(phash)
+        if src is None or not src.exists():
+            skipped += 1
+            return
+        issues = issues_for(phash, entry, variant=variant)
+        if issues:
+            blocked.append({
+                "pixel_hash": phash,
+                "name": entry.get("name"),
+                "category": entry.get("category"),
+                "source_file": str(src),
+                "is_recolor": variant,
+                "issues": issues,
+            })
+            return
+
+        name = sanitize_name(entry.get("name") or "unnamed")
+        category = entry.get("category") or "other/unclassified"
+        dest_dir = target_root / category.replace("\\", "/")
+        if variant:
+            dest_dir = dest_dir / "recolor"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_png = _free_png_path(dest_dir, name)
+        _promote_image(src, dest_png, copy=copy)
+        moved += 1
+        built_names.setdefault((category, name), []).append(dest_png.stem)
+
+        if variant:
+            recolor_count += 1
+            base = entries.get(v2b[phash])
+            base_name = (sanitize_name(base.get("name") or "unnamed")
+                         if isinstance(base, dict) else f"unknown_{v2b[phash][:8]}")
+            record = _sprite_record(entry, domain, name, category, phash,
+                                    is_recolor=True, base_name=base_name)
+        else:
+            recolor_variants = [
+                sanitize_name(entries[vh].get("name") or "unnamed")
+                for vh in variants_by_base.get(phash, {})
+                if isinstance(entries.get(vh), dict)
+            ]
+            record = _sprite_record(entry, domain, name, category, phash,
+                                    is_recolor=False,
+                                    recolor_variants=recolor_variants)
+        (dest_dir / f"{dest_png.stem}.toml").write_text(
+            toml_dumps(record), encoding="utf-8")
+
+    # --- Phase 1: base (non-recolor) images; Phase 2: recolor variants ---
     for phash, entry in entries.items():
         if not isinstance(entry, dict):
             skipped += 1
             continue
-        if entry.get("is_recolor"):
+        if entry.get("is_recolor") or phash in v2b:
             continue
-        if phash in v2b:
-            continue  # recolor variant, handled in Phase 2
-
-        name = sanitize_name(entry.get("name") or "unnamed")
-        category = entry.get("category") or "other/unclassified"
-        reference = entry.get("reference")
-        default_source = (domain.reference_sources[0]
-                          if reference and domain.reference_sources
-                          else domain.default_source)
-        source = entry.get("source") or default_source
-        tags = entry.get("tags") or []
-        subcategory = entry.get("subcategory") or ""
-
-        src = sources_by_hash.get(phash)
-        if src is None or not src.exists():
-            skipped += 1
-            continue
-
-        safe_cat = category.replace("/", os.sep).replace("\\", os.sep)
-        dest_dir = target_root / safe_cat
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
-        dest_png = dest_dir / f"{name}.png"
-        if dest_png.exists():
-            stem = name
-            i = 1
-            while dest_png.exists():
-                dest_png = dest_dir / f"{stem}_{i}.png"
-                i += 1
-
-        _promote_image(src, dest_png)
-        moved += 1
-
-        if not tags:
-            parts = category.split("/")
-            tags = parts
-
-        phash = pixel_hash(dest_png)
-
-        recolor_variants = []
-        for vh in variants_by_base.get(phash, {}):
-            for v_ph, v_entry in entries.items():
-                if v_ph == vh and isinstance(v_entry, dict):
-                    recolor_variants.append(sanitize_name(v_entry.get("name") or "unnamed"))
-                    break
-
-        sprite_toml = {
-            "name": name,
-            "category": category,
-            "subcategory": subcategory,
-            "reference": reference,
-            "source": source,
-            "confidence": entry.get("confidence"),
-            "pixel_hash": phash,
-            "is_recolor": False,
-            "base_image": None,
-            "recolor_of": None,
-            "recolor_variants": recolor_variants,
-            "tags": tags,
-        }
-        toml_path = dest_dir / f"{dest_png.stem}.toml"
-        toml_path.write_text(toml_dumps(sprite_toml), encoding="utf-8")
-
-        catalog_entries.append({
-            "name": name,
-            "category": category,
-            "subcategory": subcategory,
-            "reference": reference,
-            "source": source,
-            "confidence": entry.get("confidence"),
-            "pixel_hash": phash,
-            "is_recolor": False,
-            "base_image": None,
-            "recolor_of": None,
-            "recolor_variants": recolor_variants,
-            "tags": tags,
-            "file": f"{category}/{dest_png.name}",
-        })
-
-    # --- Phase 2: Process recolor variants ---
+        promote(phash, entry, variant=False)
     for phash, entry in entries.items():
-        if not isinstance(entry, dict):
-            continue
-        if phash not in v2b:
-            continue
+        if isinstance(entry, dict) and phash in v2b:
+            promote(phash, entry, variant=True)
 
-        name = sanitize_name(entry.get("name") or "unnamed")
-        base_hash = v2b[phash]
-
-        base_name = None
-        for b_ph, b_entry in entries.items():
-            if b_ph == base_hash and isinstance(b_entry, dict):
-                base_name = sanitize_name(b_entry.get("name") or "unnamed")
-                break
-        if not base_name:
-            base_name = f"unknown_{base_hash[:8]}"
-
-        category = entry.get("category") or "other/unclassified"
-        reference = entry.get("reference")
-        default_source = (domain.reference_sources[0]
-                          if reference and domain.reference_sources
-                          else domain.default_source)
-        source = entry.get("source") or default_source
-        tags = entry.get("tags") or []
-        subcategory = entry.get("subcategory") or ""
-
-        src = sources_by_hash.get(phash)
-        if src is None or not src.exists():
-            skipped += 1
-            continue
-
-        safe_cat = category.replace("/", os.sep).replace("\\", os.sep)
-        dest_dir = target_root / safe_cat / "recolor"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
-        dest_png = dest_dir / f"{name}.png"
-        if dest_png.exists():
-            stem = name
-            i = 1
-            while dest_png.exists():
-                dest_png = dest_dir / f"{stem}_{i}.png"
-                i += 1
-
-        _promote_image(src, dest_png)
-        moved += 1
-        recolor_count += 1
-
-        phash = pixel_hash(dest_png)
-
-        if not tags:
-            parts = category.split("/")
-            tags = parts
-
-        sprite_toml = {
-            "name": name,
-            "category": category,
-            "subcategory": subcategory,
-            "reference": reference,
-            "source": source,
-            "confidence": entry.get("confidence"),
-            "pixel_hash": phash,
-            "is_recolor": True,
-            "base_image": base_name,
-            "recolor_of": base_name,
-            "recolor_variants": [],
-            "tags": tags,
-        }
-        toml_path = dest_dir / f"{dest_png.stem}.toml"
-        toml_path.write_text(toml_dumps(sprite_toml), encoding="utf-8")
-
-        catalog_entries.append({
-            "name": name,
-            "category": category,
-            "subcategory": subcategory,
-            "reference": reference,
-            "source": source,
-            "confidence": entry.get("confidence"),
-            "pixel_hash": phash,
-            "is_recolor": True,
-            "base_image": base_name,
-            "recolor_of": base_name,
-            "recolor_variants": [],
-            "tags": tags,
-            "file": f"{category}/recolor/{dest_png.name}",
-        })
-
-    # Write master catalog index.
-    catalog = {
-        "version": 1,
-        "domain": domain.key,
-        "count": len(catalog_entries),
-        "entries": catalog_entries,
-    }
+    indexed = write_catalog_index(target_root, domain)
     catalog_path_out = target_root / "catalog.toml"
-    catalog_path_out.write_text(toml_dumps(catalog), encoding="utf-8")
 
-    print(f"Cataloged {len(catalog_entries)} sprite(s) into {target_root}")
+    verb = "Copied" if copy else "Moved"
+    print(f"{verb} {moved} sprite(s) into {target_root}")
     print(f"  Base images: {moved - recolor_count}")
     print(f"  Recolor variants: {recolor_count}")
-    print(f"  Skipped: {skipped}")
-    print(f"Master index: {catalog_path_out}")
+    print(f"  Not in source folder(s): {skipped}")
+    print(f"Master index: {catalog_path_out} ({indexed} entries)")
+
+    duplicates = {key: stems for key, stems in built_names.items() if len(stems) > 1}
+    if duplicates:
+        print(f"  Note: {len(duplicates)} name(s) were promoted more than once this run "
+              f"(files suffixed _1, _2, …; use `id` in catalog.toml to tell them apart).")
+
+    report_path = meta_path.parent / "build_blocked.json"
+    if blocked:
+        reasons = collections.Counter(i for b in blocked for i in b["issues"])
+        print(f"BLOCKED {len(blocked)} sprite(s) that are not catalogue-ready "
+              f"(left in place):")
+        for reason, count in reasons.most_common():
+            print(f"  {reason:<20} {count}")
+        atomic_save({"domain": domain.key, "count": len(blocked),
+                     "reasons": dict(reasons), "entries": blocked}, report_path)
+        print(f"Details: {report_path}")
+        print("Fix them via label/infer or the approve/reject page, or pass "
+              "--allow-unsafe to promote anyway.")
+    elif report_path.exists():
+        report_path.unlink()
 
     # A zero-match run almost always means the source folder is wrong (e.g. the
     # sprites were already moved out by `move-approved`). Point --sprites at the
     # folder the approved sprites were moved to (default: out/items/approved).
-    if moved == 0 and skipped > 0:
+    if moved == 0 and not blocked and skipped > 0:
         print(
             "WARNING: 0 sprites matched in the source folder(s). If you ran "
             "`move-approved` first, pass --sprites <approved folder> (the approved "
@@ -295,4 +296,11 @@ def register(subparsers):
                    help="scan subfolders (default: on for spells, off for items)")
     p.add_argument("--target", default=None,
                    help="output catalogue root (default: out/@items or out/@spells)")
+    p.add_argument("--allow-unsafe", action="store_true",
+                   help="promote entries even if they fail the readiness gate "
+                        "(placeholder name, unknown category, no tags, no LLM pass)")
+    p.add_argument("--min-confidence", type=float, default=None, metavar="X",
+                   help="also block un-approved entries with model confidence below X")
+    p.add_argument("--copy", action="store_true",
+                   help="copy source images instead of moving them (non-destructive)")
     p.set_defaults(func=build_catalog)

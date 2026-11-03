@@ -81,12 +81,19 @@ Pick a number to run a step, `r` to refresh state, `a` to run all remaining in
 order, or `q` to quit. AI-dependent steps are flagged ⚠ until
 `ORCAROUTER_API_KEY` is exported.
 
-The step list comes from the domain profile: items get normalize/dedup/index/
-auto-name/approve/build; spells get index/dedup/infer/label/build, because spell
-packs already carry names and categories in their folder structure and are
-curated (so normalize/rename and auto-name do not apply). Spell dedup is
-report-only: it never deletes icons, since recolors are often distinct spells.
-Both domains end with `viewer` (browse the built catalogue) once `build` has run.
+The step list comes from the domain profile. Items get normalize/dedup/index/
+review-label/auto-name/label/infer/review-approval/move-approved/build. Spells
+get index/dedup/label/infer/review-label/apply-labels/review-approval/
+move-approved/build. Spells skip normalize/rename (icons keep their pack names)
+and auto-name (there is no reference art to match against). Their review-label
+page is a manual queue: it lists only the icons the AI passes left blocked
+(placeholder names like `Icon13`, no tags), and `apply-labels` writes back the
+cards you edited. Both
+domains share the same post-AI gate: a human approves each icon, and `build`
+only promotes entries that pass the [readiness gate](#readiness-gate). Spell
+dedup is report-only: it never deletes icons, since recolors are often distinct
+spells. Both domains end with `viewer` (browse the built catalogue) once
+`build` has run.
 
 ---
 
@@ -101,12 +108,14 @@ All commands are `python3 sprite.py <command> [options]`.
 | `dedup` | Near-duplicate detection + recolor groups (hash-based, `--apply` deletes; spell wizard runs it report-only) |
 | `index` | Scan a reference folder (e.g. `dcss/`) into unified metadata (VLLM hints) |
 | `auto-name` | Fill names/categories from catalogue entries via `pixel_hash` |
-| `review-label` | Offline grid labeling page with outline matches |
+| `review-label` | Offline grid labeling page (name, category, tags) with outline matches; `--pending-only` lists just the icons the build would block |
 | `label` | AI tagging via OrcaRouter (`deepseek-v4-flash-vision-exp`), `--move-tagged-to` moves tagged out |
 | `infer` | Re-infer category/subcategory/tags for named sprites (cheap text-only by default; `--force` refreshes after a rename) |
+| `apply-labels` | Write cards edited on the labeling page (name/category/tags) into metadata as manual labels; untouched cards are ignored |
 | `review-approval` | Single-sprite Y/N approve/reject page (post-AI), writes decisions JSON |
-| `move-approved` | Commit manual edits to metadata, then move approved sprites out of `in/sprites/` based on decisions JSON |
-| `build` | Assemble the catalogued library (`out/@items/`) + `catalog.toml` |
+| `move-approved` | Commit manual edits (and the approve/reject decision) to metadata, then move approved sprites into the domain's approved folder |
+| `build` | Assemble the catalogued library (`out/@items/`) + `catalog.toml`; blocks entries that fail the readiness gate |
+| `revert` | Move catalogue assets that fail the gate back to the input folder (dry-run unless `--apply`; `--from-manifest` undoes) |
 | `viewer` | Browse the built catalogue (`out/@items` / `out/@spells`) as an offline HTML page |
 | `guided` | Launch the interactive 0-to-hero wizard for the selected domain (also the default with no args) |
 
@@ -133,8 +142,10 @@ A domain supplies its own defaults:
 | categories | weapons/armor/food/... | offensive/defensive/healing/... |
 | scan subfolders | no | yes (spell packs are nested) |
 
-`build --domain spells` reads both `in/spellicon` and `in/spellicon-named` by
-default. Pass `--sprites DIR` (repeatable) to override.
+`build --domain spells` reads `out/spells/approved` (icons approved via
+`move-approved`) and the curated `in/spellicon-named` by default. Raw packs in
+`in/spellicon` are never built directly. Pass `--sprites DIR` (repeatable) to
+override.
 
 Runtime files live in one state directory per domain (`out/items/`,
 `out/spells/`): metadata, exported labels, review pages, approval JSON, and the
@@ -168,16 +179,72 @@ python3 sprite.py infer --domain spells --sprites in/spellicon-named
 python3 sprite.py index --domain spells --dir in/spellicon
 python3 sprite.py label --domain spells --sprites in/spellicon
 
-# 3. Assemble out/@spells/<category>/<name>.png + .toml + catalog.toml
+# 3. Manual labeling for what the AI could not name/tag (grid page)
+python3 sprite.py review-label --domain spells --pending-only  # -> out/spells/label_review.html
+#    Export labels.json from the page into out/spells/, then:
+python3 sprite.py apply-labels --domain spells
+
+# 4. Review: approve/reject each icon, fixing names/categories on the page
+python3 sprite.py review-approval --domain spells   # -> out/spells/approve_reject.html
+python3 sprite.py move-approved --domain spells     # merge edits, move approved
+
+# 5. Assemble out/@spells/<category>/<name>.png + .toml + catalog.toml
 python3 sprite.py build --domain spells
 
-# 4. Browse the result (offline HTML page)
+# 6. Browse the result (offline HTML page)
 python3 sprite.py viewer --domain spells
 ```
 
 > **Note:** like the item `build`, the spell build *promotes* (moves) source
-> images into the catalogue. Run it after the LLM passes, or back up
-> `in/spellicon*` first. JPG inputs are decoded and written as PNG.
+> images into the catalogue (`--copy` keeps the source). JPG inputs are decoded
+> and written as PNG. Review ids for nested packs are `<pack>/<file>`, and
+> decisions are matched by pixel hash, so equal filenames in different packs
+> don't collide.
+
+### Readiness gate
+
+`build` checks every entry before promoting it (`lib/core/quality.py`). An entry
+is blocked, left where it is, and listed in `out/<domain>/build_blocked.json`
+when it has:
+
+| reason | meaning |
+|---|---|
+| `placeholder_name` | empty, `unnamed`, `icon12`, `sprite_0031`, digits only |
+| `invalid_category` | not in the domain vocabulary (aliases such as `off`→`offensive` are expanded when results are stored) |
+| `missing_tags` | no tags |
+| `unprocessed` | never got a usable LLM response and nobody edited it |
+| `flagged_for_review` | the last LLM response was incomplete |
+| `rejected` | rejected on the approve/reject page |
+| `low_confidence` | below `--min-confidence X` (opt-in) |
+
+Approving an icon waives the soft checks (tags, unprocessed, review flag,
+confidence). It never waives name or category, because those decide the
+catalogue path. `--allow-unsafe` disables the gate entirely.
+
+`label`/`infer` only store a model response when it has a real name, a known
+category and at least one tag. Anything less is kept under `vllm_last` with
+`needs_review`, and the entry is retried on the next run. After 3 incomplete
+responses it is left for the approve/reject page.
+
+`catalog.toml` is regenerated from every per-sprite TOML in the catalogue, so
+assets from earlier runs stay indexed. Each record has a unique `id`
+(`<category>/<file stem>`) even when two assets share a `name`.
+
+### Undoing bad promotions (`revert`)
+
+```bash
+python3 sprite.py revert --domain spells            # dry-run: list flagged catalogue assets
+python3 sprite.py revert --domain spells --all      # dry-run: the whole catalogue
+python3 sprite.py revert --domain spells --apply    # move flagged icons back to in/spellicon
+python3 sprite.py revert --domain spells --from-manifest out/spells/revert-<stamp>.json --apply
+```
+
+`--apply` moves each flagged PNG back to its recorded source path
+(`entry["path"]`, e.g. `in/spellicon/<pack>/<file>.png`). It quarantines the
+TOMLs under `out/<domain>/reverted/<stamp>/`, writes a manifest that
+`--from-manifest` can replay in reverse, prunes empty category folders and
+regenerates `catalog.toml`. Metadata is not modified, so the reverted icons go
+back through label/infer → review → build.
 
 ---
 
