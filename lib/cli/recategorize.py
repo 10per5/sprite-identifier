@@ -162,6 +162,7 @@ def _propose(args, domain, target_root, meta_path, proposals_path):
                               "current": record.get("category")})
         else:
             todo.append((png, toml_path, record))
+    reused = len(proposals)
     if proposals:
         print(f"Reusing {len(proposals)} earlier judgment(s); "
               f"--rejudge to ask the model again.")
@@ -175,18 +176,22 @@ def _propose(args, domain, target_root, meta_path, proposals_path):
           f"~${len(records) * COST_PER_SPRITE:.2f}")
 
     try:
-        _judge(records, args, domain, entries, api_key, report, proposals_path)
+        _judge(records, args, domain, entries, api_key, report, proposals_path,
+               target_root)
     except KeyboardInterrupt:
         atomic_save(report, proposals_path)
         print(f"\nInterrupted; {len(proposals)} proposal(s) saved to "
-              f"{_rel(proposals_path)}. Rerun to continue where it stopped.")
+              f"{_rel(proposals_path)} (spent ~${(len(proposals) - reused) * COST_PER_SPRITE:.2f} "
+              f"this run). Rerun to continue where it stopped.")
         raise SystemExit(130)
     atomic_save(report, proposals_path)
-    print(f"\nProposals: {_rel(proposals_path)}")
+    print(f"\nTotal estimated cost: ~${len(records) * COST_PER_SPRITE:.2f}")
+    print(f"Proposals: {_rel(proposals_path)}")
     return report
 
 
-def _judge(records, args, domain, entries, api_key, report, proposals_path):
+def _judge(records, args, domain, entries, api_key, report, proposals_path,
+           target_root):
     proposals = report["proposals"]
     for i, (png, _toml_path, record) in enumerate(records, 1):
         entry = entries.get(record.get("pixel_hash")) or {}
@@ -225,6 +230,8 @@ def _judge(records, args, domain, entries, api_key, report, proposals_path):
               f"{result.get('notes', '')[:70]}")
         if i % 10 == 0:
             atomic_save(report, proposals_path)
+            print(f"    cost milestone: spent ~${i * COST_PER_SPRITE:.2f} · "
+                  f"remaining ~${(len(records) - i) * COST_PER_SPRITE:.2f}")
         time.sleep(args.sleep)
 
 
