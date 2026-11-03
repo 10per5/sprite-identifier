@@ -68,55 +68,72 @@ SPELL_TAXONOMY = {
 }
 
 
-SYSTEM_PROMPT = """You are an expert at identifying pixel-art spell and ability icons from fantasy RPGs.
+def _tag_vocabulary():
+    """Prompt-ready tag lists, one line per group (e.g. ``element: fire, ice``)."""
+    groups = ("element_tags", "function_tags", "target_tags", "effect_tags",
+              "visual_tags", "color_tags")
+    return "\n".join(
+        f"  {group.removesuffix('_tags')}: {', '.join(SPELL_TAXONOMY[group])}"
+        for group in groups
+    )
 
-Return ONLY a JSON object with these keys:
-  - name: short snake_case spell name (e.g. "fireball", "frost_nova", "healing_light")
-  - category: one of: offensive, defensive, healing, buff, debuff, control, summoning, movement, utility, divination, other
-  - subcategory: element or school (e.g. "fire", "ice", "lightning", "earth", "air", "water", "poison", "holy", "shadow", "nature", "arcane", "physical")
-  - tags: array of short lowercase descriptor strings (element, function, target, effect, visual, quality, color)
+
+_CATEGORIES = ", ".join(SPELL_TAXONOMY["categories"])
+_SUBCATEGORIES = ", ".join(SPELL_TAXONOMY["subcategories"])
+
+# Shared reply contract. Key order matters: replies that get cut off lose the
+# *last* keys, so the required fields come first and `notes` comes last.
+_REPLY_RULES = f"""Return ONLY one JSON object, keys in this order:
+  - name: short snake_case spell name describing the effect (e.g. "fireball", "frost_nova", "healing_light")
+  - category: exactly one of: {_CATEGORIES}
+  - subcategory: one of: {_SUBCATEGORIES} (or "" if none fits)
+  - tags: 3 to 10 lowercase tags, preferably from the vocabulary below
   - confidence: float 0-1
-  - notes: one short sentence
+  - notes: optional, at most 12 words (or "")
 
-The icon may show a projectile, aura, summon, curse, shield, gesture, or impact.
-Describe the magical effect, not a physical item. Do not include markdown fences.
-Just raw JSON."""
+Tag vocabulary:
+{_tag_vocabulary()}
+
+Rules:
+  - name, category and at least 3 tags are required. Never leave tags empty.
+  - Filenames like "Icon46", "ability_icons1_12" or "skill_03" carry no meaning:
+    never reuse them as the name.
+  - The pack folder (e.g. "warlock", "fairy", "pyromancer") is a strong hint
+    for the element and school.
+  - No markdown fences, no text before or after the JSON."""
 
 
-USER_PROMPT_TEMPLATE = """Spell icon filename: {sprite_id}
-Category hint: {category}
+SYSTEM_PROMPT = f"""You are an expert at identifying pixel-art spell and ability icons from fantasy RPGs.
+Look at the icon: it may show a projectile, aura, summon, curse, shield, gesture or impact.
+Describe the magical effect, not a physical item.
+
+{_REPLY_RULES}"""
+
+
+USER_PROMPT_TEMPLATE = """Pack folder: {pack}
+Filename: {filename}
+Category hint (heuristic, may be wrong): {category}
+Name hint (from the filename, may be meaningless): {name}
+
+Name, categorise and tag the spell shown in the image. JSON only."""
+
+
+TEXT_SYSTEM_PROMPT = f"""You are an expert at identifying pixel-art spell and ability icons from fantasy RPGs.
+You are NOT shown the image: infer the spell from its filename, pack folder and hints.
+Read them closely: element words, effect words, targets, colors and gestures all matter.
+Describe a magical effect, not a physical item.
+
+{_REPLY_RULES}
+  - Never return an empty response. If unsure, still give your best guess with
+    a low confidence."""
+
+
+TEXT_USER_PROMPT_TEMPLATE = """Pack folder: {pack}
+Filename: {filename}
+Category hint (heuristic, may be wrong): {category}
 Name hint: {name}
 
-Choose the best-fitting spell name, category, subcategory, and tags.
-Return JSON with name, category, subcategory, tags, confidence, notes."""
-
-
-TEXT_SYSTEM_PROMPT = """You are an expert at identifying pixel-art spell and ability icons from fantasy RPGs. You are NOT shown the image — infer the spell purely from its filename and the provided hints.
-
-Return ONLY a JSON object with these keys:
-  - name: short snake_case spell name (e.g. "fireball", "frost_nova", "healing_light")
-  - category: one of: offensive, defensive, healing, buff, debuff, control, summoning, movement, utility, divination, other
-  - subcategory: element or school (e.g. "fire", "ice", "lightning", "earth", "air", "water", "poison", "holy", "shadow", "nature", "arcane", "physical")
-  - tags: array of short lowercase descriptor strings (element, function, target, effect, visual, quality, color)
-  - confidence: float 0-1
-  - notes: one short sentence
-
-The filename is your only evidence, so read it closely: element words, effect
-words, targets, colors, and gestures all matter. Describe a magical effect, not
-a physical item. Do not include markdown fences. Just raw JSON.
-Never return an empty or blank response: always output the JSON object. If you
-are unsure about a field, use an empty string ("") or empty array ([]) rather
-than omitting it."""
-
-
-TEXT_USER_PROMPT_TEMPLATE = """Spell icon filename: {sprite_id}
-Category hint: {category}
-Name hint: {name}
-
-Choose the best-fitting spell name, category, subcategory, and tags using ONLY
-these hints (no image is provided).
-Return JSON with name, category, subcategory, tags, confidence, notes.
-Respond with the JSON object only — never leave the response blank or empty."""
+No image is provided. Name, categorise and tag the spell from these hints. JSON only."""
 
 
 SPELL_PROMPTS = PromptSet(
@@ -409,10 +426,11 @@ SPELL_DOMAIN = Domain(
     extensions=(".png", ".jpg", ".jpeg"),
     default_source="spellicon",
     reference_sources=(),
-    # After the AI passes, review-label shows only the icons that are still
-    # blocked (placeholder names, no tags) for manual naming/tagging.
+    # Manual labeling comes before the AI passes, like items: whatever you
+    # name/tag by hand is not sent to the vision model, and the AI handles the
+    # rest. Leftovers can still be fixed on the approve/reject page.
     wizard_steps=(
-        "index", "dedup", "label", "infer", "review-label", "apply-labels",
+        "index", "dedup", "review-label", "apply-labels", "label", "infer",
         "review-approval", "move-approved", "build", "viewer",
     ),
     named_source_dir="in/spellicon-named",

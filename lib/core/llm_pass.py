@@ -159,6 +159,10 @@ def run_llm_pass(
         for phash, entry, path in pending:
             sprite_id = entry.get("name") or path.stem
             data_uri = image_to_b64(path) if use_image else None
+            # The pack folder is real evidence when the filename is `Icon46`.
+            rel_parent = path.parent.relative_to(sprites_dir).as_posix()
+            context = {"pack": "" if rel_parent == "." else rel_parent,
+                       "filename": path.name}
             result = call_vllm_with_fallback(
                 api_key,
                 data_uri,
@@ -173,6 +177,7 @@ def run_llm_pass(
                 deadline=deadline,
                 fallback_models=fallback_models,
                 prompts=prompts,
+                context=context,
             )
 
             if result.get("auth_error"):
@@ -209,8 +214,9 @@ def run_llm_pass(
                 print(f"  [{done}/{total}] {sprite_id} ({phash}) → {head} | {tags_preview}{used_tag}")
             else:
                 missing = ", ".join((entry.get("vllm_last") or {}).get("missing", []))
+                cut = " — reply hit max_tokens" if result.get("finish_reason") == "length" else ""
                 print(f"  [{done}/{total}] {sprite_id} ({phash}) → INCOMPLETE "
-                      f"(missing {missing or '?'}; left for retry/review){used_tag}")
+                      f"(missing {missing or '?'}{cut}; left for retry/review){used_tag}")
 
             if done % milestone == 0 or done == total:
                 if cost_per_sprite is not None:

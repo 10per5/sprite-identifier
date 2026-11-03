@@ -261,7 +261,7 @@ def _step_review_label(ctx, opts):
         output=opts.get("output", ctx.domain.label_review_html),
         top=6,
         # Without reference art there is nothing to match against, so the
-        # page is a manual queue for what the AI passes left blocked.
+        # page lists only icons that are not catalogue-ready yet.
         pending_only=not ctx.domain.reference_sources,
     ))
 
@@ -414,7 +414,8 @@ def _status_for(step, ctx):
         out = project_path(ctx.domain.label_review_html)
         if not ctx.domain.reference_sources:
             if ctx.manual_pending:
-                return "todo", f"{ctx.manual_pending} still blocked — name/tag by hand"
+                return "optional", (f"{ctx.manual_pending} not catalogue-ready — "
+                                    f"label any by hand, AI does the rest")
             return "done", "nothing left to label"
         return ("done", "page generated") if out.exists() else ("optional", "optional")
     if step.key == "apply-labels":

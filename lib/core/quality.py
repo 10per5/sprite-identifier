@@ -189,6 +189,7 @@ def apply_llm_result(entry, result, domain, *, take_name=True):
             "tags": result.get("tags"),
             "confidence": confidence,
             "notes": result.get("notes", ""),
+            "finish_reason": result.get("finish_reason"),
             "missing": missing,
         }
         entry["llm_status"] = "incomplete"

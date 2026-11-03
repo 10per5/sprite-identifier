@@ -98,12 +98,13 @@ order, or `q` to quit. AI-dependent steps are flagged ⚠ until
 
 The step list comes from the domain profile. Items get normalize/dedup/index/
 review-label/auto-name/label/infer/review-approval/move-approved/build. Spells
-get index/dedup/label/infer/review-label/apply-labels/review-approval/
+get index/dedup/review-label/apply-labels/label/infer/review-approval/
 move-approved/build. Spells skip normalize/rename (icons keep their pack names)
-and auto-name (there is no reference art to match against). Their review-label
-page is a manual queue: it lists only the icons the AI passes left blocked
-(placeholder names like `Icon13`, no tags), and `apply-labels` writes back the
-cards you edited. Both
+and auto-name (there is no reference art to match against). As with items,
+manual labeling comes before the AI passes and is optional: the review-label
+page lists only icons that are not catalogue-ready (placeholder names like
+`Icon13`, no tags), `apply-labels` writes back the cards you edited, and
+`label` skips icons you already tagged by hand. Both
 domains share the same post-AI gate: a human approves each icon, and `build`
 only promotes entries that pass the [readiness gate](#readiness-gate). Spell
 dedup is report-only: it never deletes icons, since recolors are often distinct
@@ -186,18 +187,19 @@ prompts differ. The worker split is deliberate:
 ```bash
 export ORCAROUTER_API_KEY=your_key
 
-# 1. Already-named icons: index names/category hints, then fill tags.
-python3 sprite.py index --domain spells --dir in/spellicon-named
-python3 sprite.py infer --domain spells --sprites in/spellicon-named
-
-# 2. Unnamed icons: let the vision model name/categorise/tag them.
+# 1. Optional manual labeling first (grid page): name/tag any icons by hand.
 python3 sprite.py index --domain spells --dir in/spellicon
-python3 sprite.py label --domain spells --sprites in/spellicon
-
-# 3. Manual labeling for what the AI could not name/tag (grid page)
 python3 sprite.py review-label --domain spells --pending-only  # -> out/spells/label_review.html
 #    Export labels.json from the page into out/spells/, then:
 python3 sprite.py apply-labels --domain spells
+
+# 2. Already-named icons: index names/category hints, then fill tags.
+python3 sprite.py index --domain spells --dir in/spellicon-named
+python3 sprite.py infer --domain spells --sprites in/spellicon-named
+
+# 3. Everything else: the vision model names/categorises/tags it
+#    (icons you tagged by hand in step 1 are skipped).
+python3 sprite.py label --domain spells --sprites in/spellicon
 
 # 4. Review: approve/reject each icon, fixing names/categories on the page
 python3 sprite.py review-approval --domain spells   # -> out/spells/approve_reject.html

@@ -24,7 +24,7 @@ MODEL_COST = {
     TEXT_MODEL: (0.020, 0.060),    # ($/1M input, $/1M output) — cheap text model
     VISION_MODEL: (0.220, 0.660),  # vision model
 }
-EST_INPUT_TOKENS = 1200    # text prompt only (no image for the default pass)
+EST_INPUT_TOKENS = 1600    # text prompt only (no image), incl. spell tag vocabulary
 EST_OUTPUT_TOKENS = 120    # JSON response
 
 

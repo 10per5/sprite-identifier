@@ -57,11 +57,11 @@ def _salvage_json(content, sprite_id, name, category):
         m = re.search(rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)*)', content)
         if m:
             result[key] = m.group(1)
-    m = re.search(r'"tags"\s*:\s*\[((?:[^\]]*))\]?\s*[},]?\s*$', content)
+    # The array may be followed by more keys (a cut-off ``notes``) or be cut
+    # off itself; keep every fully quoted tag either way.
+    m = re.search(r'"tags"\s*:\s*\[([^\]]*)', content)
     if m:
-        tags_str = m.group(1)
-        tags = re.findall(r'"((?:[^"\\]|\\.)*)"', tags_str)
-        result["tags"] = tags
+        result["tags"] = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
     m = re.search(r'"confidence"\s*:\s*([0-9.]+)', content)
     if m:
         try:
@@ -71,8 +71,14 @@ def _salvage_json(content, sprite_id, name, category):
     return result
 
 
+# Output budget per reply. 300 cut ~250 spell replies off mid-``notes``; the
+# JSON itself is ~150 tokens, the rest is headroom for verbose/reasoning models.
+MAX_TOKENS = 600
+
+
 def call_vllm(api_key, data_uri, sprite_id, category, name, debug=False, retries=2,
-              model=VISION_MODEL, use_image=True, timeout=30, prompts=None):
+              model=VISION_MODEL, use_image=True, timeout=30, prompts=None,
+              context=None):
     """Call an OrcaRouter chat-completions model and return parsed label fields.
 
     use_image=False sends a TEXT-ONLY request (no sprite image). Much cheaper, and
@@ -82,6 +88,13 @@ def call_vllm(api_key, data_uri, sprite_id, category, name, debug=False, retries
 
     ``prompts`` is an optional :class:`lib.domains.base.PromptSet`; when omitted
     the original item prompts are used for backward compatibility.
+
+    ``context`` adds extra template fields (e.g. ``pack`` for spell icons);
+    templates that don't use a field simply ignore it.
+
+    Parsed results carry ``finish_reason`` (``"length"`` = the reply hit
+    ``MAX_TOKENS``) so callers can tell truncation from a model that answered
+    badly.
 
     On auth failure (401/403) returns a dict with ``auth_error=True`` so callers
     can abort the whole batch instead of retrying a doomed key.
@@ -96,8 +109,9 @@ def call_vllm(api_key, data_uri, sprite_id, category, name, debug=False, retries
     else:
         sys_prompt = prompts.vision_system if use_image else prompts.text_system
         user_prompt_tmpl = prompts.vision_user if use_image else prompts.text_user
+    fields = {"pack": "", "filename": sprite_id, **(context or {})}
     user_content = [{"type": "text", "text": user_prompt_tmpl.format(
-        sprite_id=sprite_id, category=category, name=name
+        sprite_id=sprite_id, category=category, name=name, **fields
     )}]
     if use_image:
         user_content.append({"type": "image_url", "image_url": {"url": data_uri}})
@@ -108,7 +122,7 @@ def call_vllm(api_key, data_uri, sprite_id, category, name, debug=False, retries
             {"role": "user", "content": user_content},
         ],
         "temperature": 0.2,
-        "max_tokens": 300,
+        "max_tokens": MAX_TOKENS,
     }
     req = urllib.request.Request(
         f"{API_BASE}/chat/completions",
@@ -121,7 +135,9 @@ def call_vllm(api_key, data_uri, sprite_id, category, name, debug=False, retries
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
-            content = body["choices"][0]["message"]["content"].strip()
+            choice = body["choices"][0]
+            finish_reason = choice.get("finish_reason")
+            content = (choice["message"].get("content") or "").strip()
             if content.startswith("```"):
                 content = content.split("```", 2)[1]
                 if content.startswith("json"):
@@ -145,6 +161,7 @@ def call_vllm(api_key, data_uri, sprite_id, category, name, debug=False, retries
                 "tags": result.get("tags", []),
                 "confidence": result.get("confidence"),
                 "notes": result.get("notes", ""),
+                "finish_reason": finish_reason,
             }
         except json.JSONDecodeError as exc:
             last_error = exc
@@ -160,6 +177,7 @@ def call_vllm(api_key, data_uri, sprite_id, category, name, debug=False, retries
                     "tags": salvaged.get("tags", []),
                     "confidence": salvaged.get("confidence"),
                     "notes": salvaged.get("notes", "salvaged from truncated response"),
+                    "finish_reason": finish_reason,
                 }
             if attempt < retries:
                 time.sleep(1.5 * (attempt + 1))
@@ -255,7 +273,7 @@ def _is_transient_error(notes):
 def call_vllm_with_fallback(api_key, data_uri, sprite_id, category, name,
                             debug=False, retries=2, model=TEXT_MODEL, use_image=True,
                             timeout=30, deadline=None, fallback_models=None,
-                            transient_retries=2, prompts=None):
+                            transient_retries=2, prompts=None, context=None):
     """Try ``model``, then each ``fallback_models`` entry, within a hard ``deadline``.
 
     Solves the "one slow model blocks the whole batch" problem: if the primary
@@ -300,7 +318,8 @@ def call_vllm_with_fallback(api_key, data_uri, sprite_id, category, name,
     if deadline is None and len(ordered) == 1:
         result = call_vllm(api_key, data_uri, sprite_id, category, name,
                            debug=debug, retries=retries, model=ordered[0],
-                           use_image=use_image, timeout=timeout, prompts=prompts)
+                           use_image=use_image, timeout=timeout, prompts=prompts,
+                           context=context)
         result.setdefault("model_used", ordered[0])
         return result
 
@@ -327,7 +346,7 @@ def call_vllm_with_fallback(api_key, data_uri, sprite_id, category, name,
             result = call_vllm(api_key, data_uri, sprite_id, category, name,
                                debug=debug, retries=0, model=m,
                                use_image=use_image, timeout=req_timeout,
-                               prompts=prompts)
+                               prompts=prompts, context=context)
             if result.get("auth_error"):
                 return result  # fatal — caller aborts the whole batch
             if not result.get("notes", "").startswith("error:"):

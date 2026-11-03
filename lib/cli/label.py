@@ -26,7 +26,7 @@ from lib.util.paths import project_path, iter_images
 # OrcaRouter deepseek-v4-flash-vision-exp pricing (off-peak)
 INPUT_COST_PER_1M = 0.220
 OUTPUT_COST_PER_1M = 0.660
-EST_INPUT_TOKENS = 2500   # image base64 + text prompt
+EST_INPUT_TOKENS = 2900   # image base64 + text prompt (incl. spell tag vocabulary)
 EST_OUTPUT_TOKENS = 150   # JSON response
 COST_PER_SPRITE = (EST_INPUT_TOKENS / 1_000_000) * INPUT_COST_PER_1M + \
                   (EST_OUTPUT_TOKENS / 1_000_000) * OUTPUT_COST_PER_1M
